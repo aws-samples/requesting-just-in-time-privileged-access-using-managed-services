@@ -1,0 +1,1251 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+# AWS IAM Identity Center Just-in-Time privileged access, with Systems Manager Change Manager
+# This CloudFormation template needs to be initialized in the requester account.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS IAM Identity Center JIT Access with SSM - Request form
+
+Parameters:
+  ManagementAccountId:
+    Description: Management account ID
+    Type: String
+    AllowedPattern: ^\d{12}$
+
+  PermissionSets:
+    Description: >-
+      List of AWS SSO permission sets to offer. Needs to be the same as
+      the management account stack parameters.
+    Type: CommaDelimitedList
+    Default: AWSAdministratorAccess,AWSPowerUserAccess,AWSReadOnlyAccess
+
+  ApprovalMode:
+    Description: >-
+      Select Web_and_CLI_only for raising/approving requests from web/CLI. Configure your Change Manager settings to use AWS SSO/AWS Identity Center.
+      Select Chatbot_only to only allow raising/approving requests directly from chat channels.  Configure your Change Manager settings to use IAM.
+    Type: String
+    Default: 'Web_and_CLI_only'
+    AllowedValues:
+      - 'Web_and_CLI_only'
+      - 'Chatbot_only'
+
+  CreateSSMServiceLinkedRole:
+    Description: >-
+      Set this to Yes unless you get an error about the AWSServiceRoleForAmazonSSM service role already existing.
+    Type: String
+    Default: 'Yes'
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+
+  CreateChangeManagerServiceLinkedRole:
+    Description: >-
+      Set this to Yes unless you get an error about the AWSServiceRoleForSystemsManagerChangeManagement service role already existing.
+    Type: String
+    Default: 'Yes'
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+
+  CreateChatbotResources:
+    Description: >-
+      Select Yes if you want to integrate with AWS Chatbot with Teams or Slack. This requires manual configuration, and works best if you configured your Slack Pro/Teams channel(s) email address as one of the notification emails in the management account templates. See the README for more information.
+    Type: String
+    Default: 'No'
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+
+  IAMIdentityCenterApproverGroupPrincipalID:
+    Description: In the management account, log into IAM Identity Center -> Groups, select the group that contains the approvers, and copy the Group ID here. If using the Chatbot_only approval mode, keep this blank,
+    Type: String
+    AllowedPattern: ^(([0-9a-f]{10}-|)[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}|)$
+    Default: ""
+
+  ChangeManagerNumberOfApprovals:
+    Description: How many users in the approval group need to approve the change? This needs to be set to 1 if using Chatbot_only approvals.
+    Type: Number
+    Default: 1
+
+  ChangeManagerAutoApprovable:
+    Description: >-
+      Can approvals be bypassed for users with RequestAccountAccessNoApproval permissions?
+    Type: String
+    Default: 'No'
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+
+  ApproveAWSAccountAccessURL:
+    Description: >-
+      (Optional) To include a direct link to the Change Manager requests page in
+      the approval notifications email, right click and copy the ApproveAWSAccountAccess
+      link in IAM Identity Center and paste it here. This assumes you are in the 
+      approver group in IAM Identity Center, and assigned access to this AWS account
+      with the ApproveAWSAccountAccess permission set.
+    Type: String
+    Default: ''
+    AllowedPattern:  (^https://.*|^$)
+
+  ChangeManagerDocumentName:
+    Description: >-
+      (Optional) Customize the Change Manager document name. Keep this blank to auto
+      generate a name. If this parameter is customized, it needs to be updated if there
+      are any updates to the SSM document in the template. This cannot start with
+      aws, amazon or amzn. Leave blank if unsure.
+    AllowedPattern: (^(?!aws.*$)(?!amazon.*$)(?!amzn.*$)[a-zA-Z0-9_\-.]{3,128}|^$)
+    Type: String
+    Default: ''
+
+  ChatbotSlackWorkspaceOrTeamsId:
+    Description: >-
+      (Chatbot, Slack/Teams) After performing the initial authorization flow with Slack in the AWS Chatbot console, copy the Slack workspace ID or team ID (not tenant ID) here
+    Type: String
+    Default: ''
+
+  ChatbotTeamsTenantId:
+    Description: >-
+      (Chatbot, Teams only) After performing the initial authorization flow with Slack in the AWS Chatbot console, copy the teams tenant ID here
+    Type: String
+    Default: ''
+
+  ChatbotChannelId:
+    Description: >-
+      (Chatbot) Requester channel ID. To get the channel ID in Slack, right click on the requester channel name in the left pane, then choose Copy Link. The channel ID is the 9-character string at the end of the URL, for example, ABCBBLZZZ. To get the channel ID in Teams, right click on the channel name in the left pane, then choose Copy, for example, 19%3ab6ef35dc342d56ba5654e6fc6d25a071%40thread.tacv2.
+    Type: String
+    Default: ''
+
+  ChatbotChannelAuthType:
+    Description: >-
+      (Chatbot) Select 'ChannelRole' here if everyone in the channel can raise access requests, by associating a role with the entire channel. Select UserRole here if each AWS Chatbot should prompt every channel member to log into AWS and select a Requester or Approver role (requires them to log in using RequestAWSAccountAccess and ApproveAWSAccountAccess respectively) 
+    Type: String
+    Default: 'ChannelRole'
+    AllowedValues:
+      - ChannelRole
+      - UserRole
+
+  ChatbotApproverChannelId:
+    Description: >-
+      (Chatbot) Leave blank if you do not have a separate approver channel, and to use the requester channel for approvers. To get the approver channel ID in Slack, right click on the approver channel name in the left pane, then choose Copy Link. The channel ID is the 9-character string at the end of the URL, for example, ABCBBLZZZ. To get the channel ID in Teams, right click on the channel name in the left pane, then choose Copy, for example, 19%3ab6ef35dc342d56ba5654e6fc6d25a071%40thread.tacv2.
+    Type: String
+    Default: ''
+
+  ChatbotApproverChannelAuthType:
+    Description: >-
+      (Chatbot) Leave blank if you do not have a separate approver channel. Select ChannelRole if anyone in the approver chat channel can approve requests without ever logging into AWS. Select UserRole here to have AWS Chatbot prompt every member to do a one-off login to this AWS account, which they need to do with ApproveAWSAccountAccess.
+    Type: String
+    Default: 'UserRole'
+    AllowedValues:
+      - ChannelRole
+      - UserRole
+
+  # Note that all SNS notification emails are configured in the management account template.
+
+Rules:
+  EnableChatbotSupportWhenChatbotOnlyMode:
+    RuleCondition: !Equals [!Ref ApprovalMode, 'Chatbot_only']
+    Assertions:
+      - Assert: !Equals [!Ref CreateChatbotResources, 'Yes']
+        AssertDescription: ApprovalMode must be 'Chatbot_only' when enabling Chatbot support
+  EnableChatbotSupportWhenChatbotOnlyModeReverse:
+    RuleCondition: !Equals [!Ref CreateChatbotResources, 'Yes']
+    Assertions:
+      - Assert: !Equals [!Ref ApprovalMode, 'Chatbot_only']
+        AssertDescription: ApprovalMode must be 'Chatbot_only' when enabling Chatbot support
+
+Mappings:
+  Variables:
+    # These variables need to be consistent with the management and requester templates:
+    SolutionVersion:
+      Value: v1.0
+    EventBusName:
+      Value: Identity-Center-JIT-Access
+    ExecutionFeedbackEventBusName:
+      Value: Identity-Center-JIT-Execution-Feedback
+    ManagementAccountSSMRoleName:
+      Value: Identity-Center-JIT-Access-SSM-Execution-Role
+    RequesterRoleName:
+      Value: Identity-Center-JIT-Access-Request-Role
+    ChatbotRequesterRoleName:
+      Value: Identity-Center-JIT-Access-Chatbot-Requester-Role
+    ChatbotApproverRoleName:
+      Value: Identity-Center-JIT-Access-Chatbot-Approver-Role
+    RequesterNotificationsSSMRoleName:
+      Value: Identity-Center-JIT-Access-Notifications-SSM-Role
+    RequesterNotificationsEventRuleRoleName:
+      Value: Identity-Center-JIT-Access-Request-Event-Rule-Role
+    ManagementAccountSNSTopicName:
+      Value: Identity-Center-JIT-Access-Request-Topic
+    ApproveAWSAccountAccessURL:
+      Value: IAM Identity Center ApproveAWSAccountAccess URL
+    ChangeManagerDocumentName:
+      Value: Change Manager Document Name
+    ChatbotSlackWorkspaceOrTeamsId:
+      Value: AWS Chatbot Workspace ID (Slack) or Teams ID (Teams)
+    ChatbotTeamsTenantId:
+      Value: AWS Chatbot Tenant ID (Teams only, leave blank for Slack)
+    ChatbotChannelId:
+      Value: Slack/Teams requester channel ID
+    ChatbotChannelAuthType:
+      Value: Slack/Teams requester channel authentication type
+    ChatbotApproverChannelId:
+      Value: Slack/Teams approver channel ID
+    ChatbotApproverChannelAuthType:
+      Value: Slack/Teams approver channel authentication type
+
+Conditions:
+  ChangeManagerAutoApprovable: !Equals [ !Ref ChangeManagerAutoApprovable, 'Yes']
+  ApproveAWSAccountAccessURL: !Not [ !Equals [ !Ref ApproveAWSAccountAccessURL, '' ] ]
+  ChangeManagerDocumentName: !Not [ !Equals [ !Ref ChangeManagerDocumentName, '' ] ]
+  CreateChatbotResources: !Equals [ !Ref CreateChatbotResources, 'Yes']
+  CreateSSMServiceLinkedRole: !Equals [ !Ref CreateSSMServiceLinkedRole, 'Yes']
+  CreateChangeManagerServiceLinkedRole: !Equals [ !Ref CreateChangeManagerServiceLinkedRole, 'Yes']
+  ApprovalModeChatbotOnly: !And
+    - !Condition CreateChatbotResources
+    - !Equals [ !Ref ApprovalMode, 'Chatbot_only']
+  UsingSlack: !And
+    - !Condition CreateChatbotResources
+    - !Equals [ !Ref ChatbotTeamsTenantId, '']
+  UsingTeams: !And
+    - !Condition CreateChatbotResources
+    - !Not [ !Equals [ !Ref ChatbotTeamsTenantId, ''] ]
+  SeparateApproverChannel: !And
+    - !Condition CreateChatbotResources
+    - !Not [ !Equals [ !Ref ChatbotApproverChannelId, ''] ]
+  UsingSlack&SeparateApproverChannel: !And
+    - !Condition ApprovalModeChatbotOnly
+    - !Condition UsingSlack
+    - !Condition SeparateApproverChannel
+  UsingTeams&SeparateApproverChannel: !And
+    - !Condition ApprovalModeChatbotOnly
+    - !Condition UsingTeams
+    - !Condition SeparateApproverChannel
+  ChatChannelMainUsingUserRole: !And
+    - !Condition CreateChatbotResources
+    - !Equals [ !Ref ChatbotChannelAuthType, 'UserRole']
+  ChatChannelApproverUsingUserRole: !And
+    - !Condition CreateChatbotResources
+    - !Equals [ !Ref ChatbotApproverChannelAuthType, 'UserRole']
+
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Required configuration
+        Parameters:
+          - ManagementAccountId
+          - PermissionSets
+          - ApprovalMode
+
+      - Label:
+          default: Approver configuration
+        Parameters:
+          - IAMIdentityCenterApproverGroupPrincipalID
+          - ChangeManagerNumberOfApprovals
+          - ChangeManagerAutoApprovable
+          - ApproveAWSAccountAccessURL
+
+      - Label:
+          default: AWS Chatbot configuration
+        Parameters:
+          - CreateChatbotResources
+          - ChatbotSlackWorkspaceOrTeamsId
+          - ChatbotTeamsTenantId
+          - ChatbotChannelId
+          - ChatbotChannelAuthType
+          - ChatbotApproverChannelId
+          - ChatbotApproverChannelAuthType
+
+      - Label:
+          default: IAM Service Roles
+        Parameters:
+          - CreateSSMServiceLinkedRole
+          - CreateChangeManagerServiceLinkedRole
+      
+      - Label:
+          default: Change Manager document name
+        Parameters:
+          - ChangeManagerDocumentName
+
+
+    ParameterLabels:
+      ManagementAccountId:
+        default: Management AWS Account ID
+      PermissionSets:
+        default: IAM Identity Center Permission Sets
+      CreateChatbotResources:
+        default: Enable AWS Chatbot support?
+      ApprovalMode:
+        default: Approval mode
+      IAMIdentityCenterApproverGroupPrincipalID:
+        default: IAM Identity Center approver group ID
+      ChangeManagerNumberOfApprovals:
+        default: Minimum number of approvals
+      ChangeManagerAutoApprovable:
+        default: Allow auto approvals?
+      CreateSSMServiceLinkedRole:
+        default: Create SSM Service Linked Role?
+      CreateChangeManagerServiceLinkedRole:
+        default: Create Change Manager Service Linked Role?
+      
+      
+
+Resources:
+
+
+##################
+# Change Manager #
+##################
+
+  ChangeManagerTemplate:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !If [ ChangeManagerDocumentName, !Ref ChangeManagerDocumentName, !Ref AWS::NoValue ]
+      DocumentType: Automation.ChangeTemplate
+      DocumentFormat: JSON
+      Tags:
+        - Key: Solution
+          Value: IAMIdentityCenterJITwithSSM
+        # This tag key is used by the script for the CLI method of raising requests:
+        - Key: Component
+          Value: IAMIdentityCenterJITwithSSMChangeManagerTemplate
+      Content:
+        schemaVersion: '0.3'
+        emergencyChange: false
+        autoApprovable: !If [ ChangeManagerAutoApprovable, true, false ]
+        description: Request AWS account access
+        executableRunBooks:
+          - name: !Ref AutomationDocumentForChangeManager
+            version: "$DEFAULT"
+        templateInformation: |
+          ## IAM Identity Center account access request
+
+          This form can be used to request access to an AWS account. 
+
+          When access is granted, the account will be visible in your standard
+          IAM Identity Center dashboard's AWS account list.
+
+          Fill in the following information:
+
+          #### Why do you need access to the AWS account?
+          Fill this.
+
+          #### Fill in any relevant links or tickets for this change:
+          Fill this.
+
+        mainSteps:
+          - name: ApproveAction1
+            action: aws:approve
+            timeoutSeconds: 2592000
+            inputs:
+              Message: "Please approve this change request"
+              EnhancedApprovals:
+                Approvers:
+                  # If Chatbot will be used for approvals, set the approver to the
+                  # chatbot approver IAM role.
+                  # Otherwise, use the IAM Identity Center group ID
+                  - approver: !If [ ApprovalModeChatbotOnly, !Ref ChatbotApproverRole, !Ref IAMIdentityCenterApproverGroupPrincipalID ]
+                    type: !If [ ApprovalModeChatbotOnly, IamRole, SSOGroup ]
+                    minRequiredApprovals: !Ref ChangeManagerNumberOfApprovals
+
+
+
+  AutomationDocumentForChangeManager:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Automation
+      DocumentFormat: YAML
+      Tags:
+        - Key: Solution
+          Value: IAMIdentityCenterJITwithSSM
+      Content:
+        schemaVersion: '0.3'
+        assumeRole: !GetAtt RequestRole.Arn
+        description: 'Request AWS Identity Center account access'
+        parameters:
+          # The following is mirrored from the management account JITAccessExecutionDocument parameters
+          AccountID:
+            type: String
+            description: Account ID to assign permission to
+            allowedPattern: ^\d{12}$
+            minChars: 12
+            maxChars: 12
+
+          DurationHours:
+            type: String # This is not an Integer because we use this as a substring later.
+            description: Duration, in hours, for access. Maximum is 12 hours.
+            allowedValues:  [ '1','2','3','4','5','6','7','8','9','10','11','12' ]
+
+          PermissionSet:
+            type: String
+            description: !Join
+              - ""
+              - - "Enter permission set: "
+                - !Join [", ", !Ref PermissionSets]
+            allowedValues: !Ref PermissionSets
+            default: AWSAdministratorAccess
+
+          RequestingUsername:
+            type: String
+            description: AWS Identity Center username requesting access
+            allowedPattern: ^[a-zA-Z0-9._@+~]*
+            minChars: 3
+            maxChars: 120
+        mainSteps:
+          # Send a EventBridge event to the management account:
+          - name: Send_request_to_management_account
+            action: aws:executeAwsApi
+            inputs:
+              Service: events
+              Api: PutEvents
+              Entries:
+                - Source: !FindInMap [Variables, EventBusName, Value]
+                  EventBusName: !Sub 
+                    - arn:${AWS::Partition}:events:${AWS::Region}:${ManagementAccountId}:event-bus/${BusName}
+                    - BusName: !FindInMap [Variables, EventBusName, Value]
+                  DetailType: Parameters
+                  Detail: >
+                    {
+                      "AccountID":  "{{AccountID}}",
+                      "DurationHours": "{{DurationHours}}",
+                      "PermissionSet": "{{PermissionSet}}",
+                      "RequestingUsername": "{{RequestingUsername}}",
+                      "requestorAccountExecutionId": "{{automation:EXECUTION_ID}}"
+                    }
+
+          - name: AWS_account_access_assigned
+            action: aws:approve
+            onFailure: Abort
+            inputs:
+              Approvers:
+                - !GetAtt RequestNotificationSSMRole.Arn
+            
+          - name: Revoked_AWS_account_access
+            action: aws:approve
+            onFailure: Abort
+            inputs:
+              Approvers:
+                - !GetAtt RequestNotificationSSMRole.Arn
+
+
+
+
+  SSMServiceLinkedRole:
+    Type: AWS::IAM::ServiceLinkedRole
+    Condition: CreateSSMServiceLinkedRole
+    Properties: 
+      AWSServiceName: ssm.amazonaws.com
+      Description: Provides access to AWS Resources managed or used by Amazon SSM.
+
+  ChangeManagerServiceLinkedRole:
+    Type: AWS::IAM::ServiceLinkedRole
+    Condition: CreateChangeManagerServiceLinkedRole
+    Properties: 
+      AWSServiceName: changemanagement.ssm.amazonaws.com
+      Description: Provides access to AWS resources managed or used by the AWS Systems Manager change management framework.
+
+  RequestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !FindInMap [Variables, RequesterRoleName, Value]
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+                Service: ssm.amazonaws.com
+            Action: [ sts:AssumeRole ]
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:automation-execution/*
+      Path: /
+      Policies:
+        - PolicyName: SendEvent
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource: !Sub 
+                  - arn:${AWS::Partition}:events:${AWS::Region}:${ManagementAccountId}:event-bus/${BusName}
+                  - BusName: !FindInMap [Variables, EventBusName, Value]
+
+
+
+######################
+# Execution feedback #
+######################
+
+# The SSM Execution document that sends the assignment request has a pause via
+# an aws:approve step. The management account can send feedback via events about when 
+# the AWS IAM Identity Center assignment was successful, and when access was
+# revoked. These events can be processed here to send a approve (success) or
+# reject (failure) signal to the aws:approve waits.
+# The end result is meant to provide the requesting user feedback about whether
+# the AWS account permission set assignment was successful. 
+
+  JITExecutionFeedbackEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !FindInMap [Variables, ExecutionFeedbackEventBusName, Value]
+
+  JITExecutionFeedbackEventBusPolicy:
+    Type: AWS::Events::EventBusPolicy
+    Properties:
+      EventBusName: !Ref JITExecutionFeedbackEventBus
+      StatementId: AllowManagementAccount
+      Statement:
+        Effect: Allow
+        Principal:
+          AWS: !Sub arn:${AWS::Partition}:iam::${ManagementAccountId}:root
+        Action: events:PutEvents
+        Resource: !GetAtt JITExecutionFeedbackEventBus.Arn
+        Condition:
+          ArnEquals:
+            aws:PrincipalArn:
+              - !Sub
+                - arn:${AWS::Partition}:iam::${ManagementAccountId}:role/${ManagementAccountSSMRoleName}
+                - ManagementAccountSSMRoleName: !FindInMap [Variables, ManagementAccountSSMRoleName, Value]
+
+  # Trigger SSM on success or reject messages
+  JITExecutionFeedbackRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Trigger JIT execution feedback approval SSM document
+      EventBusName: !Ref JITExecutionFeedbackEventBus
+      State: ENABLED
+      EventPattern:
+        source:
+          - !FindInMap [Variables, ExecutionFeedbackEventBusName, Value]
+      Targets:
+        - Id: JITExecutionFeedbackSSMAutomationDocument
+          Arn: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${JITExecutionFeedbackDocument}:$LATEST
+          RoleArn: !GetAtt JITEventRuleRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              executionId: "$.detail.executionId"
+              signal: "$.detail.signal"
+              comment: "$.detail.comment"
+            InputTemplate: |
+              { 
+                "executionId": [ "<executionId>" ],
+                "signal": [ "<signal>" ],
+                "comment": [ "<comment>" ]
+              }
+
+
+  JITExecutionFeedbackDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Automation
+      DocumentFormat: YAML
+      Tags:
+        - Key: Solution
+          Value: IAMIdentityCenterJITwithSSM
+      Content:
+        schemaVersion: '0.3'
+        assumeRole: !GetAtt RequestNotificationSSMRole.Arn
+        description: Triggered by Events sent by Management account, for JIT access feedback.
+        parameters:
+          executionId:
+            type: String
+          signal:
+            type: String
+          comment:
+            type: String
+        mainSteps:
+          - name: UpdateExecutionWithFeedback
+            action: aws:executeAwsApi
+            maxAttempts: 5
+            inputs:
+              Service: ssm
+              Api: SendAutomationSignal
+              AutomationExecutionId: "{{ executionId }}"
+              SignalType: "{{ signal }}"
+              Payload:
+                Comment: 
+                  - "{{ comment }}"
+
+
+#########################
+# Request Notifications #
+#########################
+
+  # Instead of using the default Change Manager notification email for change requests, 
+  # we can customize the change request email message that comes through 
+  # with additional details about the request (such as the account name, IP of request, etc)
+
+  # This can be done via responding to an SSM Change Manager Event when a request
+  # is raised to trigger an SSM document that gets details of the change request and 
+  # thus the account ID mentioned in the request, then looking up the account name,
+  # then sending the email.
+
+  # Role used by the Event rule to trigger the SSM documents and SNS topic
+  JITEventRuleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !FindInMap [ Variables, RequesterNotificationsEventRuleRoleName, Value ]
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+                Service: events.amazonaws.com
+            Action: [ sts:AssumeRole ]
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Path: /
+      Policies:
+        - PolicyName: TriggerAutomation
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+
+              - Effect: Allow
+                Action:
+                  - ssm:StartAutomationExecution 
+                Resource: 
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${NotificationsSSMDocument}:*
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${JITExecutionFeedbackDocument}:*
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: 
+                  - !GetAtt RequestNotificationSSMRole.Arn
+                Condition:
+                  StringLikeIfExists:
+                    iam:PassedToService: ssm.amazonaws.com
+              - Effect: Allow
+                Action: [ events:PutEvents]
+                Resource: !Sub 
+                  - arn:${AWS::Partition}:events:${AWS::Region}:${ManagementAccountId}:event-bus/${BusName}
+                  - BusName: !FindInMap [Variables, EventBusName, Value]
+  # New request created
+  RequestCreatedEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Change Manager IAM Identity Center JIT - request created
+      State: ENABLED
+      EventPattern:
+        detail-type: 
+          - AWS API Call via CloudTrail
+        source:
+          - aws.ssm
+        detail:
+          eventName:
+            - StartChangeRequestExecution
+          eventSource:
+            - ssm.amazonaws.com
+          requestParameters:
+            documentName:
+              - !Ref ChangeManagerTemplate
+            autoApprove:
+              - false
+      Targets:
+        - Id: NotificationsSSMDocument
+          Arn: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${NotificationsSSMDocument}:$LATEST
+          RoleArn: !GetAtt JITEventRuleRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              principalId: "$.detail.userIdentity.principalId"
+              sourceIPAddress: "$.detail.sourceIPAddress"
+              automationExecutionId: "$.detail.responseElements.automationExecutionId"
+              eventTime: "$.detail.eventTime"
+              userAgent: "$.detail.userAgent"
+            InputTemplate: |
+              { 
+                "principalId": [ "<principalId>" ],
+                "sourceIPAddress": [ "<sourceIPAddress>" ],
+                "automationExecutionId": [ "<automationExecutionId>" ],
+                "eventTime": [ "<eventTime>" ],
+                "userAgent": [ "<userAgent>" ],
+
+                "eventType": [ "RequestCreated" ],
+                "principalTypeWord": [ "Requester"],
+                "subject": [ "Approval required - Access to AWS account:" ],
+                "bodyHeader": [ "A new JIT AWS account access request was created that needs approval." ],
+                "textBeforeURL": [ "To approve or reject this request," ]
+              }
+
+
+  # Request Approved event
+  # Because the SendAutomationSignal event does not contain the document name,
+  # the notification SSM document has an additional check to see if the event
+  # is connected to JIT access, to avoid sending emails on unrelated approvals.
+  RequestApprovedEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Change Manager IAM Identity Center JIT - request approved
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.ssm
+        detail:
+          eventName:
+            - SendAutomationSignal
+          requestParameters:
+            signalType:
+              - "Approve"
+          # Do not trigger if it's done by the feedback IAM role:
+          userIdentity:
+            sessionContext:
+              sessionIssuer:
+                principalId: 
+                  - anything-but:
+                      - !GetAtt RequestNotificationSSMRole.RoleId
+      Targets:
+        - Id: NotificationsSSMDocument
+          Arn: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${NotificationsSSMDocument}:$LATEST
+          RoleArn: !GetAtt JITEventRuleRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              principalId: "$.detail.userIdentity.principalId"
+              sourceIPAddress: "$.detail.sourceIPAddress"
+              automationExecutionId: "$.detail.requestParameters.automationExecutionId"
+              eventTime: "$.detail.eventTime"
+              userAgent: "$.detail.userAgent"
+            InputTemplate: |
+              { 
+                "principalId": [ "<principalId>" ],
+                "sourceIPAddress": [ "<sourceIPAddress>" ],
+                "automationExecutionId": [ "<automationExecutionId>" ],
+                "eventTime": [ "<eventTime>" ],
+                "userAgent": [ "<userAgent>" ],
+
+                "eventType": [ "RequestApproved" ],
+                "principalTypeWord": [ "Approver"],
+                "subject": [ "Approved - Access to AWS account:" ],
+                "bodyHeader": [ "A JIT AWS account access request was approved." ],
+                "textBeforeURL": [ "To see more details about the approval," ]
+              }
+
+
+  # Request Rejected event
+  RequestRejectedEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Change Manager IAM Identity Center JIT - request rejected
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.ssm
+        detail:
+          eventName:
+            - SendAutomationSignal
+          requestParameters:
+            signalType:
+              - "Reject"
+          # Do not trigger if it's done by the feedback IAM role:
+          userIdentity:
+            sessionContext:
+              sessionIssuer:
+                principalId: 
+                  - anything-but:
+                      - !GetAtt RequestNotificationSSMRole.RoleId
+      Targets:
+        - Id: NotificationsSSMDocument
+          Arn: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${NotificationsSSMDocument}:$LATEST
+          RoleArn: !GetAtt JITEventRuleRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              principalId: "$.detail.userIdentity.principalId"
+              sourceIPAddress: "$.detail.sourceIPAddress"
+              automationExecutionId: "$.detail.requestParameters.automationExecutionId"
+              eventTime: "$.detail.eventTime"
+              userAgent: "$.detail.userAgent"
+            InputTemplate: |
+              { 
+                "principalId": [ "<principalId>" ],
+                "sourceIPAddress": [ "<sourceIPAddress>" ],
+                "automationExecutionId": [ "<automationExecutionId>" ],
+                "eventTime": [ "<eventTime>" ],
+                "userAgent": [ "<userAgent>" ],
+
+                "eventType": [ "RequestRejected" ],
+                "principalTypeWord": [ "Rejector"],
+                "subject": [ "Rejected - Access to AWS account:" ],
+                "bodyHeader": [ "A request for JIT AWS account access request was rejected." ],
+                "textBeforeURL": [ "To see more details about the rejection," ]
+              }
+
+
+  RequestCanceledEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Change Manager IAM Identity Center JIT - request canceled
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.ssm
+        detail:
+          eventName:
+            - StopAutomationExecution
+      Targets:
+        - Id: NotificationsSSMDocument
+          Arn: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${NotificationsSSMDocument}:$LATEST
+          RoleArn: !GetAtt JITEventRuleRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              principalId: "$.detail.userIdentity.principalId"
+              sourceIPAddress: "$.detail.sourceIPAddress"
+              automationExecutionId: "$.detail.requestParameters.automationExecutionId"
+              eventTime: "$.detail.eventTime"
+              userAgent: "$.detail.userAgent"
+            InputTemplate: |
+              { 
+                "principalId": [ "<principalId>" ],
+                "sourceIPAddress": [ "<sourceIPAddress>" ],
+                "automationExecutionId": [ "<automationExecutionId>" ],
+                "eventTime": [ "<eventTime>" ],
+                "userAgent": [ "<userAgent>" ],
+
+                "eventType": [ "RequestCancelled" ],
+                "principalTypeWord": [ "Canceller"],
+                "subject": [ "Cancelled - Access to AWS account:" ],
+                "bodyHeader": [ "A prior request for JIT AWS account access was cancelled." ],
+                "textBeforeURL": [ "To see more details about the cancelled request," ]
+              }
+
+  # This is a special case. If the user entered invalid parameters, the event
+  # generated does not contain much details, so we just send a raw SNS message.
+  # Since EventBridge doesn't allow cross-account SNS topics, we send an Event
+  # and send the SNS message in the management account.
+  InvalidParametersEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Change Manager IAM Identity Center JIT - invalid parameters
+      State: ENABLED
+      EventPattern:
+        detail:
+          eventSource:
+            - ssm.amazonaws.com
+          eventName:
+            - CreateAssociation
+          errorCode:
+            - InvalidParameters
+          requestParameters:
+            name:
+              - !Ref AutomationDocumentForChangeManager
+      Targets:
+        - Id: ManagementAccountEventBus
+          Arn: !Sub 
+            - arn:${AWS::Partition}:events:${AWS::Region}:${ManagementAccountId}:event-bus/${BusName}
+            - BusName: !FindInMap [Variables, EventBusName, Value]
+          RoleArn: !GetAtt JITEventRuleRole.Arn
+
+
+  NotificationsSSMDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Automation
+      DocumentFormat: YAML
+      Tags:
+        - Key: Solution
+          Value: IAMIdentityCenterJITwithSSM
+      Content:
+        schemaVersion: '0.3'
+        assumeRole: !GetAtt RequestNotificationSSMRole.Arn
+        description: Send SNS notifications for IAM Identity Center JIT requests. Triggered by EventBridge.
+        parameters:
+          principalId:
+            type: String
+          sourceIPAddress:
+            type: String
+          automationExecutionId:
+            type: String
+          eventTime:
+            type: String
+          userAgent:
+            type: String
+          eventType:
+            type: String
+          principalTypeWord:
+            type: String
+          subject:
+            type: String
+          bodyHeader:
+            type: String
+          textBeforeURL:
+            type: String
+        variables:
+          # This is used to conditionally append the text
+          # "Request access start time: XYZ" if the start 
+          # time was specified.
+          requestAccessStartTimeTextIfExists:
+            type: String
+            default: ''
+        mainSteps:
+          # Get automation execution details (has parameters for the request)
+          - name: Request
+            action: aws:executeAwsApi
+            maxAttempts: 5
+            inputs:
+              Service: ssm
+              Api: GetAutomationExecution
+              AutomationExecutionId: "{{ automationExecutionId }}"
+            outputs:
+              - Name: OpsItemId
+                Type: String
+                Selector: "$.AutomationExecution.OpsItemId"
+              - Name: DocumentName
+                Type: String
+                Selector: "$.AutomationExecution.DocumentName"
+              - Name: ScheduledTime
+                Type: String
+                Selector: "$.AutomationExecution.ScheduledTime"
+              - Name: ChangeRequestName
+                Type: String
+                Selector: "$.AutomationExecution.ChangeRequestName"
+              - Name: AccountID
+                Type: String
+                Selector: "$.AutomationExecution.Runbooks[0].Parameters.AccountID[0]"
+              - Name: RequestingUsername
+                Type: String
+                Selector: "$.AutomationExecution.Runbooks[0].Parameters.RequestingUsername[0]"
+              - Name: DurationHours
+                Type: String
+                Selector: "$.AutomationExecution.Runbooks[0].Parameters.DurationHours[0]"
+              - Name: PermissionSet
+                Type: String
+                Selector: "$.AutomationExecution.Runbooks[0].Parameters.PermissionSet[0]"
+
+          # The Approve event does not have the SSM document name.
+          # To prevent triggering custom notifications for non-JIT related approvals, this 
+          # step checks if the given execution ID is connected to the JIT document:
+          - name: CheckIfJITRelated
+            action: aws:branch
+            inputs:
+              Choices:
+                - NextStep: ApprovalNotRelatedtoJIT
+                  Variable: "{{ Request.DocumentName }}"
+                  StringEquals: !Ref AutomationDocumentForChangeManager
+              Default: Account
+
+          # Pass; this approval isn't related to JIT access
+          - name: ApprovalNotRelatedtoJIT
+            isEnd: true
+            action: aws:sleep
+            inputs:
+              Duration: PT0S
+
+          # Get account name
+          - name: Account
+            action: aws:executeAwsApi
+            # If DescribeAccount does not work, the email will just have the literal string {{ Account.Name }}:
+            onFailure: step:CheckIfStartDateExists 
+            inputs:
+              Service: organizations
+              Api: DescribeAccount
+              AccountId: "{{ Request.AccountID }}"
+            outputs:
+              - Name: Name
+                Type: String
+                Selector: "$.Account.Name"
+
+          # Check if the request is immediate, or has a start date:
+          - name: CheckIfStartDateExists
+            action: aws:branch
+            inputs:
+              Choices:
+                # If the ScheduledTime in the automation execution was
+                # not set, then the variable would be a literal "{{ Request..."
+                # So check if it starts with {, to know if the scheduled time
+                # was not set.
+                - NextStep: SendNotification # No start time set
+                  Variable: "{{ Request.ScheduledTime }}"
+                  StartsWith: '{'
+              Default: UpdateRequestAccessStartTimeText
+
+          - name: UpdateRequestAccessStartTimeText
+            action: aws:updateVariable
+            inputs:
+              Name: variable:requestAccessStartTimeTextIfExists
+              Value: "Request access start time: {{ Request.ScheduledTime }}"
+
+          - name: SendNotification
+            isEnd: true
+            action: aws:executeAwsApi
+            inputs:
+              Service: sns
+              Api: Publish
+              MessageAttributes:
+                EventType:
+                  DataType: String
+                  StringValue: "{{ eventType }}"
+              Subject: "{{ subject }} {{ Account.Name }} (upcoming)"
+              TopicArn: !Sub
+                - arn:${AWS::Partition}:sns:${AWS::Region}:${ManagementAccountId}:${SNSTopic}
+                - SNSTopic: !FindInMap [Variables, ManagementAccountSNSTopicName, Value]
+              Message: !If 
+                - ApprovalModeChatbotOnly
+                # With Chatbot_only mode, this email is expected to be in the chat channel.
+                # Requests cannot be approved with Web/CLI; and IP addresses are not useful.
+                - |
+                    {{ bodyHeader }}
+
+                     Request name: {{ Request.ChangeRequestName }}
+                     Request summary: {{ Request.RequestingUsername }} to be given {{ Request.PermissionSet }} permissions to {{ Account.Name }} (AWS Account ID {{ Request.AccountID }}) for {{ Request.DurationHours }} hours. {{ variable:requestAccessStartTimeTextIfExists }}
+
+                     To approve this request, type:
+                     @aws run approve-access {{ automationExecutionId }}
+                # Else, normal email:
+                - !Sub 
+                  - |
+                      {{ bodyHeader }}
+
+                      Request name: {{ Request.ChangeRequestName }}
+                      Request summary: {{ Request.RequestingUsername }} to be given {{ Request.PermissionSet }} permissions to {{ Account.Name }} (AWS Account ID {{ Request.AccountID }}) for {{ Request.DurationHours }} hours. {{ variable:requestAccessStartTimeTextIfExists }}
+
+                      Details:
+                          Event time: {{ eventTime }}
+                          {{principalTypeWord}} principal ID: {{ principalId }}
+                          {{principalTypeWord}} IP address: {{ sourceIPAddress }}
+                          {{principalTypeWord}} user agent: {{ userAgent }}
+
+                          Request IAM Identity Center username: {{ Request.RequestingUsername }}
+                          Request AWS account ID: {{ Request.AccountID }}
+                          Request AWS account name: {{ Account.Name }}
+                          Request IAM Identity Center permission set: {{ Request.PermissionSet }}
+                          Request duration in hours: {{ Request.DurationHours }}
+                          {{ variable:requestAccessStartTimeTextIfExists }}
+
+                          Request execution ID: {{ automationExecutionId }}
+                          Request Ops ID: {{ Request.OpsItemId }}
+
+                      {{ textBeforeURL }} ${moreTextBeforeURL} https://${AWS::Region}.console.aws.amazon.com/systems-manager/change-manager?region=${AWS::Region}#/change-request/view-details/{{ Request.OpsItemId }}/details
+
+                      AWS CLI reference:
+                          View details of change request:
+                              aws ssm --output json get-ops-item --ops-item-id {{ Request.OpsItemId }}
+                          View details of runbook parameters:
+                              aws ssm get-automation-execution  --automation-execution-id  {{ automationExecutionId }}
+                          Reject request: 
+                              aws ssm send-automation-signal --signal-type Reject --automation-execution-id {{ automationExecutionId }} --payload Comment="Some comment" 
+                          Approve request: 
+                              aws ssm send-automation-signal --signal-type Approve --automation-execution-id {{ automationExecutionId }} --payload Comment="Some comment" 
+
+                  - moreTextBeforeURL: !If # the direct URL to the permission set was specified in the stack:
+                    - ApproveAWSAccountAccessURL
+                    # then
+                    - !Sub "click on this link: ${ApproveAWSAccountAccessURL} , then just click on the request name, or load this URL:"
+                    # else, if it was left empty:
+                    - !Sub "log into the requester AWS account (${AWS::AccountId}), and load this URL:"
+
+
+  # Role used by the request notification SSM document
+  RequestNotificationSSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !FindInMap [Variables, RequesterNotificationsSSMRoleName, Value]
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+                Service: ssm.amazonaws.com
+            Action: [ sts:AssumeRole ]
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:automation-execution/*
+      Path: /
+      Policies:
+        - PolicyName: DocumentSteps
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - organizations:DescribeAccount
+                Resource: '*' 
+              - Effect: Allow
+                Action:
+                  - ssm:GetAutomationExecution
+                  - ssm:SendAutomationSignal
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-execution/*
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Sub
+                  - arn:${AWS::Partition}:sns:${AWS::Region}:${ManagementAccountId}:${SNSTopic}
+                  - SNSTopic: !FindInMap [Variables, ManagementAccountSNSTopicName, Value]
+              - Effect: Allow
+                Action:
+                  - ssm:GetOpsItem
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:opsitem/*
+
+
+
+###########
+# ChatBot #
+###########
+
+  # Role used by the general requester chat channel, or requesting users
+  ChatbotRequesterRole:
+    Condition: CreateChatbotResources
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !FindInMap [Variables, ChatbotRequesterRoleName, Value]
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+                Service: chatbot.amazonaws.com
+            Action: [ sts:AssumeRole ]
+      Path: /
+      Policies:
+        - PolicyName: RequesterChatPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SystemsManagerReadActions
+                Effect: Allow
+                Action:
+                  - ssm:DescribeDocument
+                  - ssm:GetAutomationExecution
+                  - ssm:GetDocument
+                  - ssm:GetOpsItem
+                  - ssm:ListDocuments
+                  - ssm:DescribeOpsItems
+                Resource: '*'
+
+              - Sid: AllowCreateChangeRequest
+                Effect: Allow
+                Action:
+                  - ssm:StartChangeRequestExecution
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${ChangeManagerTemplate}:$DEFAULT
+                Condition:
+                  BoolIfExists:
+                    ssm:AutoApprove: false
+
+
+  # Role used by either an approver chat channel, or approval chat users (ApproveAccess permission set allows PassRole to this role).
+  ChatbotApproverRole:
+    Condition: ApprovalModeChatbotOnly
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !FindInMap [Variables, ChatbotApproverRoleName, Value]
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+                Service: chatbot.amazonaws.com
+            Action: [ sts:AssumeRole ]
+      Path: /
+      Policies:
+        - PolicyName: RequesterChatPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SystemsManagerReadActions
+                Effect: Allow
+                Action:
+                  - ssm:DescribeDocument
+                  - ssm:GetAutomationExecution
+                  - ssm:GetDocument
+                  - ssm:GetOpsItem
+                  - ssm:ListDocuments
+                  - ssm:DescribeOpsItems
+                  - ssm:GetAutomationExecution
+                  - ssm:DescribeAutomationStepExecutions
+                Resource: '*'
+
+              - Sid: AllowApprove
+                Effect: Allow
+                Action: 
+                  - ssm:SendAutomationSignal
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-execution/*"
+
+              - Sid: AllowCancel
+                Effect: Allow
+                Action: 
+                  - ssm:StopAutomationExecution
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-execution/*"
+
+
+  TeamsConfigurationMainChannel:
+    Condition: UsingTeams
+    Type: AWS::Chatbot::MicrosoftTeamsChannelConfiguration
+    Properties: 
+      ConfigurationName: "iam-identity-center-jit-ssm-teams-main"
+      IamRoleArn: !GetAtt ChatbotRequesterRole.Arn
+      LoggingLevel: INFO
+      TeamId: !Ref ChatbotSlackWorkspaceOrTeamsId
+      TeamsChannelId: !Ref ChatbotChannelId
+      TeamsTenantId: !Ref ChatbotTeamsTenantId
+      UserRoleRequired: !If [ ChatChannelMainUsingUserRole, Yes, No ]
+
+  TeamsConfigurationApproverChannel:
+    Condition: UsingTeams&SeparateApproverChannel
+    Type: AWS::Chatbot::MicrosoftTeamsChannelConfiguration
+    Properties: 
+      ConfigurationName: "iam-identity-center-jit-ssm-teams-approver"
+      IamRoleArn: !GetAtt ChatbotApproverRole.Arn
+      LoggingLevel: INFO
+      TeamId: !Ref ChatbotSlackWorkspaceOrTeamsId
+      TeamsChannelId: !Ref ChatbotApproverChannelId
+      TeamsTenantId: !Ref ChatbotTeamsTenantId
+      UserRoleRequired: !If [ ChatChannelApproverUsingUserRole, Yes, No ]
+
+  SlackConfigurationMainChannel:
+    Condition: UsingSlack
+    Type: AWS::Chatbot::SlackChannelConfiguration
+    Properties: 
+      ConfigurationName: "iam-identity-center-jit-ssm-slack-main"
+      IamRoleArn: !GetAtt ChatbotRequesterRole.Arn
+      LoggingLevel: INFO
+      SlackWorkspaceId: !Ref ChatbotSlackWorkspaceOrTeamsId
+      SlackChannelId: !Ref ChatbotChannelId
+      UserRoleRequired: !If [ ChatChannelMainUsingUserRole, Yes, No ]
+
+  SlackConfigurationApproverChannel:
+    Condition: UsingSlack&SeparateApproverChannel
+    Type: AWS::Chatbot::SlackChannelConfiguration
+    Properties: 
+      ConfigurationName: "iam-identity-center-jit-ssm-slack-approver"
+      IamRoleArn: !GetAtt ChatbotRequesterRole.Arn
+      LoggingLevel: INFO
+      SlackWorkspaceId: !Ref ChatbotSlackWorkspaceOrTeamsId
+      SlackChannelId: !Ref ChatbotApproverChannelId
+      UserRoleRequired: !If [ ChatChannelApproverUsingUserRole, Yes, No ]
+
+
+###########
+# Outputs #
+###########
+
+Outputs:
+  ChangeManagerDocumentName:
+    Description: The Change Manager template document name for the requester form
+    Value: !Ref ChangeManagerTemplate
+
+  ChatbotRequesterRole:
+    Condition: CreateChatbotResources
+    Description: The IAM role for the general request chat channel or requester chat users
+    Value: !Ref ChatbotRequesterRole
+
+  ChatbotApproverRole:
+    Condition: ApprovalModeChatbotOnly
+    Description: The IAM role for either an approver chat channel or approver chat users
+    Value: !Ref ChatbotApproverRole
+
+  ChatbotAliasRequest:
+    Condition: CreateChatbotResources
+    Description: Enter this AWS Chatbot command in your requester chat channel, after starting with @aws (selecting the AWS bot if required)
+    Value: !Sub "@aws alias create access-request ssm start-change-request-execution --change-request-name $name --document-name ${ChangeManagerTemplate} --change-details \"$description\" --runbooks '[{\"DocumentName\":\"${AutomationDocumentForChangeManager}\",\"MaxConcurrency\":\"1\",\"MaxErrors\":\"1\",\"Parameters\":{\"DurationHours\":[\"$hours\"],\"RequestingUsername\":[\"$username\"],\"AccountID\":[\"$accountid\"],\"PermissionSet\":[\"$permissionset\"]}}]' --region ${AWS::Region}"
+
+  ChatbotAliasApprove:
+    Condition: ApprovalModeChatbotOnly
+    Description: Enter this AWS Chatbot command in your approver chat channel
+    Value: !Sub "@aws alias create approve-access ssm send-automation-signal --signal-type Approve --payload Comment=\"Approved via Slack\" --automation-execution-id $id --region ${AWS::Region}"
+
+

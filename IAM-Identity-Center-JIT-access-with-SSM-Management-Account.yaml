@@ -1,0 +1,1637 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+# AWS IAM Identity Center Just-in-Time privileged access, with Systems Manager Change Manager
+# This CloudFormation template needs to be initialized in the Management account.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS IAM Identity Center JIT Access with SSM - Execution stack
+
+Parameters:
+  RequesterAccountId:
+    Description: >-
+      The AWS Account ID that will host the Change Manager form for requesting access 
+      to various AWS accounts.
+    Type: String
+    AllowedPattern: ^\d{12}$
+
+  AddOrganizationsResourcePolicy:
+    Description: >-
+      Set this to 'Yes' if AWS Organizations -> Settings -> "Delegated administrator for AWS Organizations"
+      is empty. Set this to 'No' if a JSON policy already exists (eg. this stack was created previously once)
+      This is used to set a policy for the requester account to get the AWS 
+      account name from the account ID. The policy is not deleted after the stack deletion.
+    Type: String
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+    Default: 'Yes'
+
+  PermissionSets:
+    Description: Comma separated list of IAM Identity Center permission sets that users can request.
+    Type: CommaDelimitedList
+    Default: AWSAdministratorAccess,AWSPowerUserAccess,AWSReadOnlyAccess
+
+  AWSIdentityCenterInstanceArn:
+    Description: >-
+      The AWS IAM Identity Center instance ARN. Get this from the AWS Identity Center settings page, 
+      or with AWS CloudShell: aws sso-admin list-instances --query Instances[].InstanceArn
+    Type: String
+    AllowedPattern: arn:.*:sso:::instance/(sso)?ins-[a-zA-Z0-9-.]{16}
+
+  HourUnit:
+    Description: >-
+      (Optional) This needs to be set to 'H'. Only set to 'M' when testing/demoing the permission 
+      revocation to set the durationsHours in minutes instead of hours. For
+      example, to test if solution removes the permissions after the requested
+      duration properly, instead of waiting for 1 hour (minimum duration), you
+      can set this to 'M' to make it 1 minute.
+    Type: String
+    Default: 'H'
+    AllowedValues:
+      - 'H'
+      - 'M'
+
+  SendPostRequestCloudTrailSummary:
+    Description: >-
+      Whether to send a CloudTrail summary after the access is revoked. This 
+      requires Control Tower 3.0 or higher managing CloudTrail
+    Type: String
+    Default: 'No'
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+
+  PostRequestCloudTrailSummaryWaitTimeSeconds:
+    Description: >-
+      (Optional) If sending CloudTrail Summary, how long after the access is revoked should
+      we wait before generating the CloudTrail summary. Set to 0 to not wait. 
+      For more accurate summaries, this needs to be set to the Permission 
+      Boundaries maximum session duration (converted to seconds). For example,
+      the default session duration is 1 hour, so you can set this to 3600.
+    Type: Number
+    Default: 0
+
+  ChatbotUserRoles:
+    Description: >-
+      Set to Yes if you will be using AWS Chatbot in the requester account for raising/approving requests, and you are planning to enable User Roles for any chat channel.
+    Type: String
+    Default: 'No'
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+
+  ChangeManagerDocumentName: 
+    Description: >-
+      Leave blank on initial setup. This should be updated after initializing the
+      requester CloudFormation template on the requester account, after which
+      set to this to the value of the "ChangeManagerDocumentName" output of that stack.
+    Type: String
+    Default: ''
+
+
+  Notification01Email:
+    Description: (Optional) Email address for notifications.
+    Type: String
+    Default: ''
+    AllowedPattern:  (^.*@.*\..*|^$)
+  Notification01Events:
+    Description: >-
+      (Optional) Comma separated list of events to notify on for email 01: 
+      RequestCreated, RequestApproved, RequestRejected, RequestCancelled, AccessBeingAssigned, Error, AccessRevoked, CloudTrailSummary
+    Type: CommaDelimitedList
+    Default: 'RequestCreated, RequestApproved, RequestRejected, RequestCancelled, AccessBeingAssigned, Error, AccessRevoked, CloudTrailSummary'
+
+  Notification02Email:
+    Description: (Optional) Email address for notifications.
+    Type: String
+    Default: ''
+    AllowedPattern:  (^.*@.*\..*|^$)
+  Notification02Events:
+    Description: >-
+      (Optional) Comma separated list of events to notify on for email 02: 
+      RequestCreated, RequestApproved, RequestRejected, RequestCancelled, AccessBeingAssigned, Error, AccessRevoked, CloudTrailSummary
+    Type: CommaDelimitedList
+    Default: 'RequestCreated, RequestApproved, RequestRejected, RequestCancelled, AccessBeingAssigned, Error, AccessRevoked, CloudTrailSummary'
+
+  Notification03Email:
+    Description: (Optional) Email address for notifications.
+    Type: String
+    Default: ''
+    AllowedPattern:  (^.*@.*\..*|^$)
+  Notification03Events:
+    Description: >-
+      (Optional) Comma separated list of events to notify on for email 03: 
+      RequestCreated, RequestApproved, RequestRejected, RequestCancelled, AccessBeingAssigned, Error, AccessRevoked, CloudTrailSummary
+    Type: CommaDelimitedList
+    Default: 'RequestCreated, RequestApproved, RequestRejected, RequestCancelled, AccessBeingAssigned, Error, AccessRevoked, CloudTrailSummary'
+
+  Notification04Email:
+    Description: (Optional) Email address for notifications.
+    Type: String
+    Default: ''
+    AllowedPattern:  (^.*@.*\..*|^$)
+  Notification04Events:
+    Description: >-
+      (Optional) Comma separated list of events to notify on for email 04: 
+      RequestCreated, RequestApproved, RequestRejected, RequestCancelled, AccessBeingAssigned, Error, AccessRevoked, CloudTrailSummary
+    Type: CommaDelimitedList
+    Default: 'RequestCreated, RequestApproved, RequestRejected, RequestCancelled, AccessBeingAssigned, Error, AccessRevoked, CloudTrailSummary'
+
+  Notification05Email:
+    Description: (Optional) Email address for notifications.
+    Type: String
+    Default: ''
+    AllowedPattern:  (^.*@.*\..*|^$)
+  Notification05Events:
+    Description: >-
+      (Optional) Comma separated list of events to notify on for email 05: 
+      RequestCreated, RequestApproved, RequestRejected, RequestCancelled, AccessBeingAssigned, Error, AccessRevoked, CloudTrailSummary
+    Type: CommaDelimitedList
+    Default: 'RequestCreated, RequestApproved, RequestRejected, RequestCancelled, AccessBeingAssigned, Error, AccessRevoked, CloudTrailSummary'
+
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Required information
+        Parameters:
+          - RequesterAccountId
+          - AWSIdentityCenterInstanceArn
+          - PermissionSets
+
+      - Label:
+          default: Post-installation (after requester stack is created)
+        Parameters:
+          - ChangeManagerDocumentName
+
+      - Label:
+          default: CloudTrail summary
+        Parameters:
+          - SendPostRequestCloudTrailSummary
+          - PostRequestCloudTrailSummaryWaitTimeSeconds
+
+      - Label:
+          default: AWS Chatbot configuration
+        Parameters:
+          - ChatbotUserRoles
+
+      - Label:
+          default: Notification emails
+        Parameters:
+          - Notification01Email
+          - Notification01Events
+          - Notification02Email
+          - Notification02Events
+          - Notification03Email
+          - Notification03Events
+          - Notification04Email
+          - Notification04Events
+          - Notification05Email
+          - Notification05Events
+
+      - Label:
+          default: Advanced configuration
+        Parameters:
+          - AddOrganizationsResourcePolicy
+          - HourUnit
+
+
+    ParameterLabels:
+      RequesterAccountId:
+        default: Requester AWS Account ID
+      AddOrganizationsResourcePolicy:
+        default: Add AWS Organizations Resource Policy
+      PermissionSets:
+        default: IAM Identity Center Permission Sets
+      AWSIdentityCenterInstanceArn:
+        default: IAM Identity Center Instance ARN
+      HourUnit:
+        default: Hour Unit
+      SendPostRequestCloudTrailSummary:
+        default: Send post-request CloudTrail summary?
+      PostRequestCloudTrailSummaryWaitTimeSeconds:
+        default: Seconds wait before generating CloudTrail summary
+      ChatbotUserRoles:
+        default: Using AWS Chatbot User Roles?
+      ChangeManagerDocumentName:
+        default: ChangeManagerDocumentName output of requester stack
+      Notification01Email:
+        default: Notification email address 1
+      Notification01Events:
+        default: Events to notify email address 1
+      Notification02Email:
+        default: Notification email address 2
+      Notification02Events:
+        default: Events to notify email address 2
+      Notification03Email:
+        default: Notification email address 3
+      Notification03Events:
+        default: Events to notify email address 3
+      Notification04Email:
+        default: Notification email address 4
+      Notification04Events:
+        default: Events to notify email address 4
+      Notification05Email:
+        default: Notification email address 5
+      Notification05Events:
+        default: Events to notify email address 5
+
+Mappings:
+  Variables:
+    # These variables need to be consistent with the management and requester templates:
+    SolutionVersion:
+      Value: v1.0
+    EventBusName:
+      Value: Identity-Center-JIT-Access
+    ExecutionFeedbackEventBusName:
+      Value: Identity-Center-JIT-Execution-Feedback
+    ManagementAccountSSMRoleName:
+      Value: Identity-Center-JIT-Access-SSM-Execution-Role
+    RequesterRoleName:
+      Value: Identity-Center-JIT-Access-Request-Role
+    ChatbotRequesterRoleName:
+      Value: Identity-Center-JIT-Access-Chatbot-Requester-Role
+    ChatbotApproverRoleName:
+      Value: Identity-Center-JIT-Access-Chatbot-Approver-Role
+    RequesterNotificationsSSMRoleName:
+      Value: Identity-Center-JIT-Access-Notifications-SSM-Role
+    RequesterNotificationsEventRuleRoleName:
+      Value: Identity-Center-JIT-Access-Request-Event-Rule-Role
+    ManagementAccountSNSTopicName:
+      Value: Identity-Center-JIT-Access-Request-Topic
+
+    # These variables are specific to the management account:
+    CloudTrailCloudWatchLogGroup:
+      Value: aws-controltower/CloudTrailLogs
+    PermissionSetNamesToArnSSMPath:
+      Value: /identity-center-jit-access/permission-sets/
+    StackPrefix:
+      Value: AWS-Identity-Center-Assignment
+    PermissionSetSessionDurationDefault: # Length of time the new permission sets sessions are valid for
+      Value: PT8H
+    PermissionSetNameApproveAWSAccountAccess:
+      Value: ApproveAWSAccountAccess
+    PermissionSetNameRequestAWSAccountAccess:
+      Value: RequestAWSAccountAccess
+    PermissionSetNameRequestAccountAccessNoApproval:
+      Value: RequestAccountAccessNoApproval
+    
+
+
+Conditions:
+  AddOrganizationsResourcePolicy: !Equals [ !Ref AddOrganizationsResourcePolicy, 'Yes' ] 
+  SendPostRequestCloudTrailSummary: !Equals [ !Ref SendPostRequestCloudTrailSummary, 'Yes' ] 
+  Notification01Email: !Not [ !Equals [ !Ref Notification01Email, '' ] ]
+  Notification02Email: !Not [ !Equals [ !Ref Notification02Email, '' ] ]
+  Notification03Email: !Not [ !Equals [ !Ref Notification03Email, '' ] ]
+  Notification04Email: !Not [ !Equals [ !Ref Notification04Email, '' ] ]
+  Notification05Email: !Not [ !Equals [ !Ref Notification05Email, '' ] ]
+  ChangeManagerDocumentName: !Not [!Equals [ !Ref ChangeManagerDocumentName, ''] ]
+  ChatbotUserRoles: !Equals [ !Ref ChatbotUserRoles, 'Yes' ]
+
+
+Resources:
+
+###################
+# EventBridge bus #
+###################
+
+  JITAccessEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !FindInMap [Variables, EventBusName, Value]
+
+  JITAccessEventBusPolicy:
+    Type: AWS::Events::EventBusPolicy
+    Properties:
+      EventBusName: !Ref JITAccessEventBus
+      StatementId: AllowRequesterRole
+      Statement:
+        Effect: Allow
+        Principal:
+          AWS: !Sub arn:${AWS::Partition}:iam::${RequesterAccountId}:root
+        Action: events:PutEvents
+        Resource: !GetAtt JITAccessEventBus.Arn
+        Condition:
+          ArnEquals:
+            aws:PrincipalArn:
+              - !Sub
+                - arn:${AWS::Partition}:iam::${RequesterAccountId}:role/${RequesterRoleName}
+                - RequesterRoleName: !FindInMap [Variables, RequesterRoleName, Value]
+              - !Sub
+                - arn:${AWS::Partition}:iam::${RequesterAccountId}:role/${RequesterEventRuleRoleName}
+                - RequesterEventRuleRoleName: !FindInMap [Variables, RequesterNotificationsEventRuleRoleName, Value]
+
+  # Event rule, that triggers the Systems Manager automation document
+  JITAccessEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Trigger JIT Access Systems Manager Automation Document
+      EventBusName: !Ref JITAccessEventBus
+      State: ENABLED
+      EventPattern:
+        source:
+          - !FindInMap [Variables, EventBusName, Value]
+      Targets:
+        - Id: JITAccessSystemsManagerAutomationDocument
+          Arn: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${JITAccessExecutionDocument}:$LATEST
+          RoleArn: !GetAtt JITAccessEventRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              AccountID: "$.detail.AccountID"
+              DurationHours: "$.detail.DurationHours"
+              PermissionSet: "$.detail.PermissionSet"
+              RequestingUsername: "$.detail.RequestingUsername"
+              requestorAccountExecutionId: "$.detail.requestorAccountExecutionId"
+            InputTemplate: |
+              { 
+                "AccountID": [ "<AccountID>" ],
+                "DurationHours": [ "<DurationHours>" ],
+                "PermissionSet": [ "<PermissionSet>" ],
+                "RequestingUsername": [ "<RequestingUsername>" ],
+                "requestorAccountExecutionId": [ "<requestorAccountExecutionId>"]
+              }
+      
+  JITAccessEventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+                Service: events.amazonaws.com
+            Action: [ sts:AssumeRole ]
+      Path: /
+      Policies:
+        - PolicyName: TriggerAutomation
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:StartAutomationExecution 
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${JITAccessExecutionDocument}:*
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !GetAtt SystemsManagerExecutionRole.Arn
+                Condition:
+                  StringLikeIfExists:
+                    iam:PassedToService: ssm.amazonaws.com
+
+
+##############################
+# Systems Manager Automation #
+##############################
+
+  JITAccessExecutionDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Automation
+      DocumentFormat: YAML
+      Tags:
+        - Key: Solution
+          Value: IAMIdentityCenterJITwithSSM
+      Content:
+        schemaVersion: '0.3'
+        assumeRole: !GetAtt SystemsManagerExecutionRole.Arn
+        description: Assign AWS Identity Center JIT access
+        parameters:
+          AccountID:
+            type: String
+            description: Account ID to assign permission to
+            allowedPattern: ^\d{12}$
+            minChars: 12
+            maxChars: 12
+
+          DurationHours:
+            type: String # This is not an Integer because we use this as a substring later.
+            description: Duration, in hours, for access.  Maximum is 12 hours.
+            allowedValues: [ '1','2','3','4','5','6','7','8','9','10','11','12' ]
+
+          PermissionSet:
+            type: String
+            description: Permission Set required
+            allowedValues: !Ref PermissionSets
+
+          RequestingUsername:
+            type: String
+            description: AWS Identity Center username requesting access
+            allowedPattern: ^[a-zA-Z0-9._@+~]*
+            minChars: 3
+            maxChars: 120
+
+          requestorAccountExecutionId:
+            type: String
+            description: Requesting SSM document execution ID
+            allowedPattern: ^[a-zA-Z0-9-]*
+            minChars: 36
+            maxChars: 36
+
+        mainSteps:
+          - name: Get_AWS_Identity_Center_Info
+            maxAttempts: 5
+            action: aws:executeAwsApi
+            inputs:
+              Service: sso-admin
+              Api: ListInstances
+            outputs:
+              - Name: InstanceArn
+                Type: String
+                Selector: "$.Instances[0].InstanceArn"
+              - Name: IdentityStoreId
+                Type: String
+                Selector: "$.Instances[0].IdentityStoreId"
+
+          - name: Get_User_Identity_Center_Principal_ID
+            maxAttempts: 5
+            action: aws:executeAwsApi
+            inputs:
+              Service: identitystore
+              Api: ListUsers
+              IdentityStoreId: "{{ Get_AWS_Identity_Center_Info.IdentityStoreId }}"
+              Filters:
+                - AttributePath: UserName
+                  AttributeValue: "{{ RequestingUsername }}"
+            outputs:
+              - Name: UserPrincipalId
+                Type: String
+                Selector: "$.Users[0].UserId"
+
+
+          - name: Get_AWS_Account_Details
+            maxAttempts: 5
+            action: aws:executeAwsApi
+            inputs:
+              Service: organizations
+              Api: DescribeAccount
+              AccountId: "{{ AccountID }}"
+            outputs:
+              - Name: AccountName
+                Type: String
+                Selector: "$.Account.Name"
+
+
+          - name: Send_Notification
+            maxAttempts: 5
+            action: aws:executeAwsApi
+            # Do not assign access without notifications:
+            onFailure: step:StackFailure_Send_SNS_Notification
+            inputs:
+              Service: sns
+              Api: Publish
+              MessageAttributes:
+                EventType:
+                  DataType: String
+                  StringValue: "AccessBeingAssigned"
+              TopicArn: !Ref NotificationTopic
+              Subject: "{{ RequestingUsername }} getting access to {{ Get_AWS_Account_Details.AccountName }}"
+              Message: >-
+                {{ RequestingUsername }} is being granted '{{ PermissionSet }}' access to
+                {{ Get_AWS_Account_Details.AccountName }} (account ID {{ AccountID }}) for
+                {{ DurationHours }} hours (plus the permission set session duration).
+
+          - name: Create_Identity_Center_Assignment_Stack
+            action: aws:createStack
+            onFailure: step:StackFailure_Send_SNS_Notification
+            nextStep: SendAssignmentSuccessEvent
+            maxAttempts: 1
+            inputs:
+              # If you're changing the StackName here, make sure you change the 
+              # StackName in the Delete_Identity_Center_Assignment_Stack too.
+              StackName: !Sub
+                - '${StackPrefix}-{{ AccountID }}-{{ PermissionSet }}-{{ automation:EXECUTION_ID }}'
+                - StackPrefix: !FindInMap [Variables, StackPrefix, Value]
+              Parameters:
+                - ParameterKey: UserPrincipalId
+                  ParameterValue: "{{ Get_User_Identity_Center_Principal_ID.UserPrincipalId }}"
+                - ParameterKey: IAMIdentityCenterInstanceArn
+                  ParameterValue: "{{ Get_AWS_Identity_Center_Info.InstanceArn }}"
+                - ParameterKey: TargetAccountId
+                  ParameterValue: "{{ AccountID }}"
+                - ParameterKey: PermissionSetArn
+                  ParameterValue: !Sub
+                    - "${PermissionSetNamesToArnSSMPath}{{ PermissionSet }}"
+                    - PermissionSetNamesToArnSSMPath: !FindInMap [Variables, PermissionSetNamesToArnSSMPath, Value]
+              TemplateBody: |
+                AWSTemplateFormatVersion: 2010-09-09
+                Description: "{{ RequestingUsername }} {{ PermissionSet }} access to {{ Get_AWS_Account_Details.AccountName }} for {{ DurationHours }} hours."
+
+                Parameters:
+                  UserPrincipalId:
+                    Description: IAM Identity Center Principal ID for the user
+                    Type: String
+
+                  IAMIdentityCenterInstanceArn:
+                    Description: IAM Identity Center instance ARN
+                    Type: String
+
+                  TargetAccountId:
+                    Description: AWS Account ID target for assignment
+                    Type: String
+
+                  PermissionSetArn:
+                    Description: Permission set ARN
+                    Type: AWS::SSM::Parameter::Value<String>
+
+                Resources:
+                  IAMIdentityCenterAssignment:
+                    Type: AWS::SSO::Assignment
+                    Properties:
+                      InstanceArn: !Ref IAMIdentityCenterInstanceArn
+                      PermissionSetArn: !Ref PermissionSetArn
+                      PrincipalId: !Ref UserPrincipalId
+                      PrincipalType: USER
+                      TargetId: !Ref TargetAccountId
+                      TargetType: AWS_ACCOUNT
+  
+          # Send requester account's aws:approve pause step a success message for feedback
+          - name: SendAssignmentSuccessEvent
+            isCritical: false
+            onCancel: step:Wait_for_duration
+            onFailure: step:Wait_for_duration
+            nextStep: Wait_for_duration
+            action: aws:executeAwsApi
+            inputs:
+              Service: events
+              Api: PutEvents
+              Entries:
+                - Source: !FindInMap [Variables, ExecutionFeedbackEventBusName, Value]
+                  EventBusName: !Sub 
+                    - arn:${AWS::Partition}:events:${AWS::Region}:${RequesterAccountId}:event-bus/${BusName}
+                    - BusName: !FindInMap [Variables, ExecutionFeedbackEventBusName, Value]
+                  DetailType: Parameters
+                  Detail: >
+                    {
+                      "executionId":  "{{requestorAccountExecutionId}}",
+                      "signal": "Approve",
+                      "comment": "Successfully assigned access"
+                    }
+
+          # If this fails, this jumps to OnFailure_or_Cancel_Delete_IAM_Assignment_Stack
+          - name: Wait_for_duration
+            action: aws:sleep
+            onCancel: step:OnFailure_or_Cancel_Delete_Identity_Center_Assignment_Stack
+            onFailure: step:OnFailure_or_Cancel_Delete_Identity_Center_Assignment_Stack
+            nextStep: Delete_Identity_Center_Assignment_Stack
+            inputs:
+              Duration: !Sub "PT{{ DurationHours }}${HourUnit}" 
+
+
+          - name: Delete_Identity_Center_Assignment_Stack
+            action: aws:deleteStack
+            maxAttempts: 3
+            inputs:
+              StackName: !Sub
+                - "${StackPrefix}-{{ AccountID }}-{{ PermissionSet }}-{{ automation:EXECUTION_ID }}"
+                - StackPrefix: !FindInMap [Variables, StackPrefix, Value]
+
+          - name: SendRevokeSuccessEvent
+            isCritical: false
+            onFailure: Continue
+            action: aws:executeAwsApi
+            inputs:
+              Service: events
+              Api: PutEvents
+              Entries:
+                - Source: !FindInMap [Variables, ExecutionFeedbackEventBusName, Value]
+                  EventBusName: !Sub 
+                    - arn:${AWS::Partition}:events:${AWS::Region}:${RequesterAccountId}:event-bus/${BusName}
+                    - BusName: !FindInMap [Variables, ExecutionFeedbackEventBusName, Value]
+                  DetailType: Parameters
+                  Detail: >
+                    {
+                      "executionId":  "{{requestorAccountExecutionId}}",
+                      "signal": "Approve",
+                      "comment": "Successfully revoked access"
+                    }
+
+          - name: SendRevokeSuccessNotification
+            isCritical: false
+            onFailure: Continue
+            action: aws:executeAwsApi
+            inputs:
+              Service: sns
+              Api: Publish
+              MessageAttributes:
+                EventType:
+                  DataType: String
+                  StringValue: "AccessRevoked"
+              TopicArn: !Ref NotificationTopic
+              Subject: "{{ RequestingUsername }} access successfully revoked from {{ Get_AWS_Account_Details.AccountName }}"
+              Message: >-
+                {{ RequestingUsername }} '{{ PermissionSet }}' access to
+                {{ Get_AWS_Account_Details.AccountName }} (account ID {{ AccountID }})
+                was successfully revoked.
+
+          - name: Wait_for_permission_session_duration
+            action: aws:sleep
+            inputs:
+              Duration: !Sub "PT${PostRequestCloudTrailSummaryWaitTimeSeconds}S" 
+
+          # Last step if it was successful
+          - !If
+            - SendPostRequestCloudTrailSummary
+            - name: Send_CloudTrail_Summary
+              isEnd: true
+              action: aws:invokeLambdaFunction
+              maxAttempts: 3
+              timeoutSeconds: 900
+              inputs:
+                FunctionName: !Ref GetCloudTrailLogsLambda
+                LogType: "None"
+                Payload: >-
+                  {
+                    "AccountID":  "{{AccountID}}",
+                    "accountName": "{{Get_AWS_Account_Details.AccountName}}",
+                    "username": "{{RequestingUsername}}",
+                    "DurationHours": "{{DurationHours}}",
+                    "PermissionSet": "{{PermissionSet}}"
+                  }
+            # If not sending CloudTrail, just up a pass step with end:True to indicate success 
+            - name: FinishedWithSuccess
+              isEnd: true
+              action: aws:sleep
+              inputs:
+                Duration: "PT1S"
+
+          - name: StackFailure_Send_SNS_Notification
+            maxAttempts: 5
+            nextStep: StackFailure_Send_Event_Notification
+            isCritical: false
+            onFailure: Continue
+            action: aws:executeAwsApi
+            inputs:
+              Service: sns
+              Api: Publish
+              MessageAttributes:
+                EventType:
+                  DataType: String
+                  StringValue: "Error"
+              TopicArn: !Ref NotificationTopic
+              Subject: "Access assignment failure - {{ RequestingUsername }} to {{ Get_AWS_Account_Details.AccountName }}"
+              Message: !Sub 
+                - |
+                    The temporary CloudFormation stack that assigns JIT access for {{ RequestingUsername }} to get  '{{ PermissionSet }}' access to {{ Get_AWS_Account_Details.AccountName }} (account ID {{ AccountID }}) has failed. 
+
+                    To see details about the failure, log into the Management Account (${AWS::AccountId}), and look at the Event details of the stack ${StackName} (filter by Deleted stacks if required).
+
+                    If there was no stack created (even in the list of deleted stacks), check the Systems Manager Automation execution history, and examine the details for the execution ID {{automation:EXECUTION_ID}}.
+                - StackName: !Sub
+                  - '${StackPrefix}-{{ AccountID }}-{{ PermissionSet }}-{{ automation:EXECUTION_ID }}'
+                  - StackPrefix: !FindInMap [Variables, StackPrefix, Value]
+
+          # Send requester account's aws:approve pause step a failure message for feedback
+          - name: StackFailure_Send_Event_Notification
+            isCritical: false
+            nextStep: OnFailure_or_Cancel_Delete_Identity_Center_Assignment_Stack
+            action: aws:executeAwsApi
+            inputs:
+              Service: events
+              Api: PutEvents
+              Entries:
+                - Source: !FindInMap [Variables, ExecutionFeedbackEventBusName, Value]
+                  EventBusName: !Sub 
+                    - arn:${AWS::Partition}:events:${AWS::Region}:${RequesterAccountId}:event-bus/${BusName}
+                    - BusName: !FindInMap [Variables, ExecutionFeedbackEventBusName, Value]
+                  DetailType: Parameters
+                  Detail: >
+                    {
+                      "executionId":  "{{requestorAccountExecutionId}}",
+                      "signal": "Reject",
+                      "comment": "CloudFormation stack failure"
+                    }
+
+          - name: OnFailure_or_Cancel_Delete_Identity_Center_Assignment_Stack
+            isEnd: true
+            maxAttempts: 3
+            action: aws:deleteStack
+            inputs:
+              StackName: !Sub
+                - "${StackPrefix}-{{ AccountID }}-{{ PermissionSet }}-{{ automation:EXECUTION_ID }}"
+                - StackPrefix: !FindInMap [Variables, StackPrefix, Value]
+
+
+  SystemsManagerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !FindInMap [Variables, ManagementAccountSSMRoleName, Value]
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+                Service: ssm.amazonaws.com
+            Action: [ sts:AssumeRole ]
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:automation-execution/*
+      Path: /
+      Policies:
+        - PolicyName: SSMDocumentSteps
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sso:ListInstances
+                  - identitystore:ListUsers
+                  - organizations:DescribeAccount
+                  - cloudformation:DescribeStacks
+                Resource: '*' 
+              - Effect: Allow
+                Action:
+                  - sso:CreateAccountAssignment
+                  - sso:DeleteAccountAssignment
+                  - sso:TagResource
+                  - sso:UntagResource
+                Resource: '*' 
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:SetStackPolicy
+                Resource: !Sub 
+                  - arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${StackPrefix}*
+                  - StackPrefix: !FindInMap [Variables, StackPrefix, Value]
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: !Sub
+                  - 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${PermissionSetNamesToArnSSMPath}*'
+                  - PermissionSetNamesToArnSSMPath: !FindInMap [Variables, PermissionSetNamesToArnSSMPath, Value]
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+              # Send feedback of execution to requester account:
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource: !Sub 
+                  - arn:${AWS::Partition}:events:${AWS::Region}:${RequesterAccountId}:event-bus/${BusName}
+                  - BusName: !FindInMap [Variables, ExecutionFeedbackEventBusName, Value]
+              - !If
+                  - SendPostRequestCloudTrailSummary
+                  - Effect: Allow
+                    Action:
+                      - lambda:InvokeFunction
+                    Resource: !GetAtt GetCloudTrailLogsLambda.Arn
+                  - !Ref AWS::NoValue
+
+
+        # Access to IAM Identity Center:
+        - PolicyName: AWS_Identity_Center_Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - sso:DescribeAccountAssignmentCreationStatus
+                  - sso:DescribeAccountAssignmentDeletionStatus
+                  - sso:ListAccountAssignmentDeletionStatus
+                  - sso:DescribeAccountAssignmentDeletionStatus
+                  - sso:ListAccountAssignmentCreationStatus
+                  - sso:ListAccountAssignmentDeletionStatus
+                  - sso:DescribePermissionSet
+                  - sso:GetSSOStatus
+                  - sso:ListAccountsForProvisionedPermissionSet
+                  - sso:ListAccountAssignments
+                  - sso:ListPermissionSets
+                  - sso:ListPermissionSetsProvisionedToAccount
+                  - sso:ListTagsForResource
+                  - identitystore:ListUsers
+                  - cloudformation:DescribeStacks
+                  - organizations:DescribeAccount
+                  - sso:CreateAccountAssignment
+                  - sso:DeleteAccountAssignment
+                  - sso:TagResource
+                  - sso:UntagResource
+                Resource: '*'
+                Effect: Allow
+              # The following are only required when assigning access
+              # to the AWS Organizations management account:
+              - Sid: IAMListPermissions
+                Action:
+                  - iam:ListRoles
+                  - iam:ListPolicies
+                Resource: '*'
+                Effect: Allow
+              - Sid: AccessToSSOProvisionedRoles
+                Action:
+                  - iam:AttachRolePolicy
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:GetRole
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                  - iam:PutRolePolicy
+                  - iam:UpdateRole
+                  - iam:UpdateRoleDescription
+                Resource: !Sub arn:${AWS::Partition}:iam::*:role/aws-reserved/sso.amazonaws.com/*
+                Effect: Allow
+              - Sid: SAML
+                Action:
+                  - iam:GetSAMLProvider
+                Resource: !Sub arn:${AWS::Partition}:iam::*:saml-provider/AWSSSO_*_DO_NOT_DELETE
+                Effect: Allow
+
+
+#######################
+# IAM Identity Center #
+# Permission Sets     #
+#######################
+
+  PermissionSetRequestAWSAccountAccess:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: !FindInMap [ Variables, PermissionSetNameRequestAWSAccountAccess, Value ]
+      Description: Request temporary access to an AWS account with IAM Identity Center
+      InstanceArn: !Ref AWSIdentityCenterInstanceArn
+      RelayStateType: !If
+        - ChangeManagerDocumentName
+        # then set the URL to the specific change request page for the given template:
+        - !Sub https://${AWS::Region}.console.aws.amazon.com/systems-manager/change-manager?region=${AWS::Region}#/change-request/create?templateName=${ChangeManagerDocumentName}
+        # else, just the generic create Change Request page:
+        - !Sub https://${AWS::Region}.console.aws.amazon.com/systems-manager/change-manager?region=${AWS::Region}#/change-request/create
+      SessionDuration: !FindInMap [Variables, PermissionSetSessionDurationDefault, Value]
+      # Remove "AllowCancelAnyRequest" below if you want to prevent users
+      # from cancelling other requests, though note that this will prevent
+      # them from cancelling their own requests too. 
+      # Mitigation of being able to cancel any request is the SNS 
+      # notification sent on any cancellations with the username 
+      # and IP address information.
+      InlinePolicy:
+        Version: 2012-10-17
+        Statement:
+          - Sid: SystemsManagerReadActions
+            Effect: Allow
+            Action: 
+              - ssm:DescribeDocument
+              - ssm:DescribeDocumentParameters
+              - ssm:DescribeDocumentPermission
+              - ssm:GetAutomationExecution
+              - ssm:GetCalendarState
+              - ssm:GetDocument
+              - ssm:GetServiceSetting
+              - ssm:ListDocumentMetadataHistory
+              - ssm:ListDocumentVersions
+              - ssm:ListDocuments
+              - ssm:GetOpsItem
+              - ssm:GetOpsSummary
+              - ssm:DescribeOpsItems
+              - ssm:ListOpsItemEvents
+              - ssm:ListOpsItemRelatedItems
+              - ssm:ListOpsMetadata
+              - iam:ListUsers
+              - iam:ListRoles
+            Resource: '*'
+
+          - Sid: AllowCreateChangeRequest
+            Effect: Allow
+            Action: 
+              - ssm:StartChangeRequestExecution
+            Resource: !If
+              - ChangeManagerDocumentName
+              - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${RequesterAccountId}:automation-definition/${ChangeManagerDocumentName}:$DEFAULT
+              - '*'
+            Condition:
+              BoolIfExists:
+                ssm:AutoApprove: false
+
+          - Sid: AllowCancelAnyRequest
+            Effect: Allow
+            Action: 
+              - ssm:StopAutomationExecution
+            Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${RequesterAccountId}:automation-execution/*"
+
+          # Chatbot related:
+          - !If
+            - ChatbotUserRoles
+            # then
+            - Sid: AllowPassChatRole
+              Effect: Allow
+              Action: 
+                - iam:PassRole
+              Resource: !Sub 
+                - arn:${AWS::Partition}:iam::${RequesterAccountId}:role/${ChatRole}
+                - ChatRole: !FindInMap [ Variables, ChatbotRequesterRoleName, Value ]
+            # else
+            - !Ref AWS::NoValue
+          - !If
+            - ChatbotUserRoles
+            # then
+            - Sid: ChatbotUserRole
+              Effect: Allow
+              Action: 
+                - chatbot:ListMicrosoftTeamsConfiguredTeams
+                - chatbot:DescribeSlackChannelConfigurations
+                - chatbot:DescribeSlackWorkspaces
+                - chatbot:DescribeSlackChannelConfigurations
+                - chatbot:ListMicrosoftTeamsConfiguredTeams
+                - chatbot:DescribeChimeWebhookConfigurations
+                - chatbot:DescribeSlackUserIdentities
+                - chatbot:DescribeSlackChannels
+
+                - chatbot:GetMicrosoftTeamsOauthParameters
+                - chatbot:GetSlackOauthParameters
+                - chatbot:RedeemMicrosoftTeamsOauthCode
+                - chatbot:RedeemSlackOauthCode
+                - chatbot:GetMicrosoftTeamsChannelConfiguration
+                - chatbot:ListMicrosoftTeamsUserIdentities
+                - chatbot:ListMicrosoftTeamsChannelConfigurations
+              Resource: '*'
+            # else
+            - !Ref AWS::NoValue
+
+
+
+  PermissionSetRequestAccountAccessNoApproval:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: !FindInMap [ Variables, PermissionSetNameRequestAccountAccessNoApproval, Value ]
+      Description: Request and automatically get approval for temporary access to an AWS account with IAM Identity Center
+      InstanceArn: !Ref AWSIdentityCenterInstanceArn
+      RelayStateType: !If
+        - ChangeManagerDocumentName
+        # then set the URL to the specific change request page for the given template:
+        - !Sub https://${AWS::Region}.console.aws.amazon.com/systems-manager/change-manager?region=${AWS::Region}#/change-request/create?templateName=${ChangeManagerDocumentName}
+        # else, just the generic create Change Request page:
+        - !Sub https://${AWS::Region}.console.aws.amazon.com/systems-manager/change-manager?region=${AWS::Region}#/change-request/create
+      SessionDuration: !FindInMap [Variables, PermissionSetSessionDurationDefault, Value]
+      InlinePolicy:
+        Version: 2012-10-17
+        Statement:
+          - Sid: SystemsManagerReadActions
+            Effect: Allow
+            Action: 
+              - ssm:DescribeDocument
+              - ssm:DescribeDocumentParameters
+              - ssm:DescribeDocumentPermission
+              - ssm:GetAutomationExecution
+              - ssm:GetCalendarState
+              - ssm:GetDocument
+              - ssm:GetServiceSetting
+              - ssm:ListDocumentMetadataHistory
+              - ssm:ListDocumentVersions
+              - ssm:ListDocuments
+              - ssm:GetOpsItem
+              - ssm:GetOpsSummary
+              - ssm:DescribeOpsItems
+              - ssm:ListOpsItemEvents
+              - ssm:ListOpsItemRelatedItems
+              - ssm:ListOpsMetadata
+              - iam:ListUsers
+              - iam:ListRoles
+            Resource: '*'
+
+          - Sid: AllowCreateChangeRequest
+            Effect: Allow
+            Action: 
+              - ssm:StartChangeRequestExecution
+            Resource: !If
+              - ChangeManagerDocumentName
+              - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${RequesterAccountId}:automation-definition/${ChangeManagerDocumentName}:$DEFAULT
+              - '*'
+
+          - Sid: AllowCancelAnyRequest
+            Effect: Allow
+            Action: 
+              - ssm:StopAutomationExecution
+            Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${RequesterAccountId}:automation-execution/*"
+
+          # Chatbot related:
+          - !If
+            - ChatbotUserRoles
+            # then
+            - Sid: AllowPassChatRole
+              Effect: Allow
+              Action: 
+                - iam:PassRole
+              Resource: !Sub 
+                - arn:${AWS::Partition}:iam::${RequesterAccountId}:role/${ChatRole}
+                - ChatRole: !FindInMap [ Variables, ChatbotRequesterRoleName, Value ]
+            # else
+            - !Ref AWS::NoValue
+          - !If
+            - ChatbotUserRoles
+            # then
+            - Sid: ChatbotUserRole
+              Effect: Allow
+              Action: 
+                - chatbot:ListMicrosoftTeamsConfiguredTeams
+                - chatbot:DescribeSlackChannelConfigurations
+                - chatbot:DescribeSlackWorkspaces
+                - chatbot:DescribeSlackChannelConfigurations
+                - chatbot:ListMicrosoftTeamsConfiguredTeams
+                - chatbot:DescribeChimeWebhookConfigurations
+                - chatbot:DescribeSlackUserIdentities
+                - chatbot:DescribeSlackChannels
+
+                - chatbot:GetMicrosoftTeamsOauthParameters
+                - chatbot:GetSlackOauthParameters
+                - chatbot:RedeemMicrosoftTeamsOauthCode
+                - chatbot:RedeemSlackOauthCode
+                - chatbot:GetMicrosoftTeamsChannelConfiguration
+                - chatbot:ListMicrosoftTeamsUserIdentities
+                - chatbot:ListMicrosoftTeamsChannelConfigurations
+              Resource: '*'
+            # else
+            - !Ref AWS::NoValue
+
+
+
+  PermissionSetApproveAWSAccountAccess:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: !FindInMap [ Variables, PermissionSetNameApproveAWSAccountAccess, Value ]
+      Description: Approve temporary access to an account
+      InstanceArn: !Ref AWSIdentityCenterInstanceArn
+      RelayStateType: !Sub https://${AWS::Region}.console.aws.amazon.com/systems-manager/change-manager?region=${AWS::Region}#/dashboard/requests?status=PendingApproval
+      SessionDuration: !FindInMap [Variables, PermissionSetSessionDurationDefault, Value]
+      InlinePolicy:
+        Version: 2012-10-17
+        Statement:
+          - Sid: SystemsManagerReadActions
+            Effect: Allow
+            Action: 
+              - ssm:DescribeDocument
+              - ssm:DescribeDocumentParameters
+              - ssm:DescribeDocumentPermission
+              - ssm:DescribeAutomationStepExecutions
+              - ssm:GetAutomationExecution
+              - ssm:GetCalendarState
+              - ssm:GetDocument
+              - ssm:GetServiceSetting
+              - ssm:ListDocumentMetadataHistory
+              - ssm:ListDocumentVersions
+              - ssm:ListDocuments
+              - ssm:GetOpsItem
+              - ssm:GetOpsSummary
+              - ssm:DescribeOpsItems
+              - ssm:ListOpsItemEvents
+              - ssm:ListOpsItemRelatedItems
+              - ssm:ListOpsMetadata
+              - iam:ListUsers
+              - iam:ListRoles
+            Resource: '*'
+
+          - Sid: AllowApprove
+            Effect: Allow
+            Action: 
+              - ssm:SendAutomationSignal
+            Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${RequesterAccountId}:automation-execution/*"
+
+          - Sid: AllowCancel
+            Effect: Allow
+            Action: 
+              - ssm:StopAutomationExecution
+            Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${RequesterAccountId}:automation-execution/*"
+
+
+          # Chatbot related:
+          - !If
+            - ChatbotUserRoles
+            # then
+            - Sid: AllowPassChatRole
+              Effect: Allow
+              Action: 
+                - iam:PassRole
+              Resource: !Sub 
+                - arn:${AWS::Partition}:iam::${RequesterAccountId}:role/${ChatRole}
+                - ChatRole: !FindInMap [ Variables, ChatbotApproverRoleName, Value ]
+            # else
+            - !Ref AWS::NoValue
+          - !If
+            - ChatbotUserRoles
+            # then
+            - Sid: ChatbotUserRole
+              Effect: Allow
+              Action: 
+                - chatbot:ListMicrosoftTeamsConfiguredTeams
+                - chatbot:DescribeSlackChannelConfigurations
+                - chatbot:DescribeSlackWorkspaces
+                - chatbot:DescribeSlackChannelConfigurations
+                - chatbot:ListMicrosoftTeamsConfiguredTeams
+                - chatbot:DescribeChimeWebhookConfigurations
+                - chatbot:DescribeSlackUserIdentities
+                - chatbot:DescribeSlackChannels
+
+                - chatbot:GetMicrosoftTeamsOauthParameters
+                - chatbot:GetSlackOauthParameters
+                - chatbot:RedeemMicrosoftTeamsOauthCode
+                - chatbot:RedeemSlackOauthCode
+                - chatbot:GetMicrosoftTeamsChannelConfiguration
+                - chatbot:ListMicrosoftTeamsUserIdentities
+                - chatbot:ListMicrosoftTeamsChannelConfigurations
+              Resource: '*'
+            # else
+            - !Ref AWS::NoValue
+
+#####################################
+# AWS Organizations resource policy #
+#####################################
+
+# This sets up permissions for the requester account to be able to resolve
+# the account name from an account ID.
+
+# This is set to a deletion policy of Retain, because there can only be one 
+# AWS Organizations resource policy as of writing, and if it is manually 
+# customized, and if this stack gets deleted, then the customized policy
+# would get deleted. Setting DeletitionPolicy to Retain avoids this.
+
+  OrganizationsResourcePolicy:
+    Condition: AddOrganizationsResourcePolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::Organizations::ResourcePolicy
+    Properties:
+      Content:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowIAMIdentityCenterJITGetAccountName
+            Effect: Allow
+            Principal:
+              AWS: !Ref RequesterAccountId
+            Action:
+              - 'organizations:DescribeAccount'
+            Resource: '*'
+
+
+################################################
+# PermissionSet Name -> ARN in Parameter Store #
+################################################
+
+# As of writing, there is no AWS SSO API to get the permission set ARN (required
+# by the SSO assignment) from a permission set name. You need to iterate 
+# through all possible permission set IDs, and do a describe call on each ARN, 
+# and then check if the name matches the one you are looking for.
+# So instead, we will be keeping SSM parameters with each Permission Set name,
+# with the value set to the ARN, making it easy to look up:
+
+# As SSO does not yet have CloudWatch Events on Permission Set creations,
+# this will be triggered on a schedule every 15 minutes.
+
+  PermissionSetNameToArnLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Used for the Identity Center JIT Access PermissionSet name to ARN SSM parameter store Lambda
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ lambda.amazonaws.com ]
+            Action: [ sts:AssumeRole ]
+      ManagedPolicyArns: [ !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" ]
+      Policies:
+        - PolicyName: Lambda
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: WriteParameterStore
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                Resource: !Sub
+                  - 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${PermissionSetNamesToArnSSMPath}*'
+                  - PermissionSetNamesToArnSSMPath: !FindInMap [Variables, PermissionSetNamesToArnSSMPath, Value]
+              - Sid: ReadSSO
+                Effect: Allow
+                Action:
+                  - sso:ListInstances
+                  - sso:ListPermissionSets
+                  - sso:DescribePermissionSet
+                Resource: '*'
+
+  PermissionSetNameToArnLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${PermissionSetNameToArnLambdaFunction}"
+      RetentionInDays: 30
+
+  PermissionSetNameToArnLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: index.handler
+      MemorySize: 128
+      Role: !GetAtt PermissionSetNameToArnLambdaRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          SSM_PARAM_PATH: !FindInMap [Variables, PermissionSetNamesToArnSSMPath, Value]
+      Code:
+        ZipFile: !Sub |
+          import os
+          import boto3
+          from botocore.config import Config
+
+          boto3_config = Config(retries={'max_attempts': 10, 'mode': 'standard'})
+          ssm = boto3.client('ssm', config=boto3_config)
+          sso = boto3.client('sso-admin', config=boto3_config)
+          cache = {}
+
+          # Environment variables:
+          ssm_param_path = os.environ['SSM_PARAM_PATH']
+          if not ssm_param_path.startswith('/') or not ssm_param_path.endswith('/'):
+            raise Exception('Error: SSM_PARAM_PATH needs to start and end with a slash')
+
+
+          def handler(event, context):
+
+            # Get instance ARN
+            instance_arn = sso.list_instances()['Instances'][0]['InstanceArn']
+
+            # Go through the list of all permission set IDs
+            pages = sso.get_paginator('list_permission_sets').paginate(InstanceArn=instance_arn)
+            for page in pages:
+              permission_sets = page['PermissionSets']
+              for permission_set_arn in permission_sets:
+                # Check if it's in the cache (if the function is warm)
+                if permission_set_arn in cache:
+                  print(f'Skipping {permission_set_arn}, in cache.')
+                  continue
+                
+                # Get the permission set name
+                permission_set_name = sso.describe_permission_set(
+                  InstanceArn=instance_arn,
+                  PermissionSetArn=permission_set_arn
+                )['PermissionSet']['Name']
+
+                
+                param_name = f'{ssm_param_path}{permission_set_name}'
+                print(f'Writing to SSM Parameter Store {param_name} with value {permission_set_arn}...')
+                # Write to SSM parameter store
+                ssm.put_parameter(
+                    Name=param_name,
+                    Description=f'ARN for permission set {permission_set_name}',
+                    Value=permission_set_arn,
+                    Type='String',
+                    Overwrite=True,
+                    AllowedPattern='^arn:${AWS::Partition}:sso:::permissionSet/ssoins-.*'
+                )
+
+                # Update cache:
+                cache[permission_set_arn] = permission_set_name
+
+            print('All done!')
+
+
+  PermissionSetNameToArnLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PermissionSetNameToArnLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PermissionSetNameToArnLambdaSchedule.Arn
+
+
+  PermissionSetNameToArnLambdaSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Trigger PermissionSetNameToArnLambdaFunction
+      ScheduleExpression: rate(15 minutes)
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt PermissionSetNameToArnLambdaFunction.Arn
+          Id: PermissionSetNameToArnLambdaFunction
+
+
+
+########################################
+# CloudTrail log summary (conditional) #
+########################################
+
+  GetCloudTrailLogsRole:
+    Condition: SendPostRequestCloudTrailSummary
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Used by the IAM Identity Center JIT document Lambda to get CloudTrail logs
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ lambda.amazonaws.com ]
+            Action: [ sts:AssumeRole ]
+      ManagedPolicyArns: [ !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" ]
+      Policies:
+        - PolicyName: SendEmail
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: AllowSNSMessage
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+        - PolicyName: CloudTrailCloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:StartQuery
+                  - logs:GetQueryResults
+                Resource: !Sub 
+                  - arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroup}:*
+                  - LogGroup: !FindInMap [Variables, CloudTrailCloudWatchLogGroup, Value]
+  GetCloudTrailLogsLambda:
+    Condition: SendPostRequestCloudTrailSummary
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: index.handler
+      MemorySize: 128
+      Role: !GetAtt GetCloudTrailLogsRole.Arn
+      Timeout: 900
+      Environment:
+        Variables:
+          LOG_GROUP_NAME: !FindInMap [Variables, CloudTrailCloudWatchLogGroup, Value]
+          POST_WAIT_SECONDS: !Ref PostRequestCloudTrailSummaryWaitTimeSeconds
+          AWS_PARTITION: !Ref AWS::Partition
+          SNS_TOPIC_ARN: !Ref NotificationTopic
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import time
+          import textwrap
+          from datetime import datetime
+          from botocore.config import Config
+
+          log_group = os.environ['LOG_GROUP_NAME']
+          post_wait_seconds = int(os.environ['POST_WAIT_SECONDS'])
+          partition = os.environ['AWS_PARTITION']
+          region = os.environ['AWS_REGION']
+          sns_topic_arn = os.environ['SNS_TOPIC_ARN']
+
+          btconfig = Config(retries={'max_attempts': 10, 'mode': 'standard'})
+          sns = boto3.client('sns', config=btconfig)
+          cwlogs = boto3.client('logs', config=btconfig)
+
+          def handler(event, context):
+            print(f'Event is {event}')
+
+            account_id = event['AccountID']
+            account_name = event['accountName']
+            username = event['username']
+            duration_hours = int(event['DurationHours'])
+            permission_set = event['PermissionSet']
+
+            # Try to sanitize input:
+            for bad_char in ";:=#%&*()[]{}/\\?<>'\"":
+              username = username.replace(bad_char, '')
+              account_id = account_id.replace(bad_char, '')
+              permission_set = permission_set.replace(bad_char, '')
+              account_name = account_name.replace(bad_char, '')
+            if duration_hours < 1:
+              raise('Duration hours is too short')
+            if duration_hours > 4030:
+              raise('Duration hours is too long')
+
+            end_time = int(time.time())
+            start_time = end_time - ((duration_hours*60*60) + post_wait_seconds)
+
+            query = f'''
+            filter userIdentity.accountId = '{account_id}'
+            | parse userIdentity.principalId ':*' as identity_center_username
+            | filter identity_center_username = '{username}' and readOnly = 0 and not ispresent(errorCode)
+            | fields concat(eventSource, ':', eventName) as event
+            | stats count(*) as Count by event, sourceIPAddress, awsRegion
+            | sort Count desc
+            | display Count, sourceIPAddress, awsRegion, event
+            '''
+            print(f'Running query {query}')
+
+            # Start query
+            query_id = cwlogs.start_query(
+              logGroupName=log_group,
+              startTime = start_time,
+              endTime = end_time,
+              queryString=query
+            )['queryId']
+
+            response = None
+            while not response or response['status'] in ('Scheduled', 'Running'):
+              response = cwlogs.get_query_results(queryId=query_id)
+              status = response['status']
+              if status in ('Failed', 'Cancelled', 'Timeout', 'Unknown'):
+                raise Exception(f'Got an unexpected status from the query: {status}')
+              time.sleep(3)
+            
+            print(response)
+            results = response['results']
+
+            response_text = f'''
+            SSO JIT CloudTrail log summary:
+
+              Username: {username}
+              Account ID: {account_id}
+              Account name: {account_name}
+              Requested permission set: {permission_set}
+              Requested duration in hours: {duration_hours}
+              Request start date: {datetime.utcfromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S UTC')}
+              Log end date:  {datetime.utcfromtimestamp(end_time).strftime('%Y-%m-%d %H:%M:%S UTC')}
+
+            Events:
+            This does not include read only events, data events, or API calls that failed.
+
+            '''
+            response_text = textwrap.dedent(response_text)
+
+            if len(results) == 0:
+              response_text += "No events were recorded in the time period."
+              print(response_text)
+            else:
+              headers = [entry['field'] for entry in results[0]]
+              row_format = "{:<7}{:<17}{:<18}{}"
+              response_text += row_format.format(*headers)
+
+            for entry in results:
+              values = [ x['value'] for x in entry ]
+              response_text += '\n'
+              response_text += row_format.format(*values)
+            response_text += '\n'
+
+            # SNS supports 256 KB messages:
+            response_text = response_text[:262000]
+            print(response_text)
+            sns.publish(
+              TopicArn=sns_topic_arn, 
+              Subject=f'AWS Identity Center JIT CloudTrail summary for {username}', 
+              MessageAttributes={'EventType': {'DataType':'String', 'StringValue':'CloudTrailSummary'}},
+              Message=response_text
+            )
+
+  GetCloudTrailLambdaLogGroup:
+    Condition: SendPostRequestCloudTrailSummary
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${GetCloudTrailLogsLambda}"
+      RetentionInDays: 30
+
+
+##########################
+# Notification SNS topic #
+##########################
+
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !FindInMap [Variables, ManagementAccountSNSTopicName, Value]
+      DisplayName: IAM Identity Center JIT notifications
+
+  NotificationTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref NotificationTopic
+      PolicyDocument:
+        Statement:
+          - Sid: AllowSSMSameAccount
+            Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: [ sns:Publish ]
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+            Resource: !Ref NotificationTopic
+          - Sid: AllowEvents
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: [ sns:Publish ]
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+            Resource: !Ref NotificationTopic
+          - Sid: AllowSSMRequesterAccount
+            Effect: Allow
+            Principal:
+              AWS: !Ref RequesterAccountId
+            Action: [ sns:Publish ]
+            Resource: !Ref NotificationTopic
+            Condition:
+              ArnEquals:
+                aws:PrincipalArn: !Sub
+                - arn:${AWS::Partition}:iam::${RequesterAccountId}:role/${RequesterNotificationsSSMRoleName}
+                - RequesterNotificationsSSMRoleName: !FindInMap [Variables, RequesterNotificationsSSMRoleName, Value]
+
+  NotificationTopicSubscription01:
+    Type: AWS::SNS::Subscription
+    Condition: Notification01Email
+    Properties:
+      Protocol: email
+      TopicArn: !Ref NotificationTopic
+      Endpoint: !Ref Notification01Email
+      FilterPolicy: 
+        EventType: !Ref Notification01Events
+  NotificationTopicSubscription02:
+    Type: AWS::SNS::Subscription
+    Condition: Notification02Email
+    Properties:
+      Protocol: email
+      TopicArn: !Ref NotificationTopic
+      Endpoint: !Ref Notification02Email
+      FilterPolicy: 
+        EventType: !Ref Notification02Events
+  NotificationTopicSubscription03:
+    Type: AWS::SNS::Subscription
+    Condition: Notification03Email
+    Properties:
+      Protocol: email
+      TopicArn: !Ref NotificationTopic
+      Endpoint: !Ref Notification03Email
+      FilterPolicy: 
+        EventType: !Ref Notification03Events
+  NotificationTopicSubscription04:
+    Type: AWS::SNS::Subscription
+    Condition: Notification04Email
+    Properties:
+      Protocol: email
+      TopicArn: !Ref NotificationTopic
+      Endpoint: !Ref Notification04Email
+      FilterPolicy: 
+        EventType: !Ref Notification04Events
+  NotificationTopicSubscription05:
+    Type: AWS::SNS::Subscription
+    Condition: Notification05Email
+    Properties:
+      Protocol: email
+      TopicArn: !Ref NotificationTopic
+      Endpoint: !Ref Notification05Email
+      FilterPolicy: 
+        EventType: !Ref Notification05Events
+
+  # Cross-account event when there are invalid parameters in the request account
+  InvalidParametersEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Change Manager IAM Identity Center JIT - invalid parameters
+      EventBusName: !Ref JITAccessEventBus
+      State: ENABLED
+      EventPattern:
+        detail:
+          eventName:
+            - CreateAssociation
+          errorCode:
+            - InvalidParameters
+      Targets:
+        - Id: SNSTopic
+          Arn: !Ref NotificationTopic
+          InputTransformer:
+            InputPathsMap:
+              eventTime: "$.detail.eventTime"
+              errorCode: "$.detail.errorCode"
+              errorMessage: "$.detail.errorMessage"
+              detail: "$.detail"
+            InputTemplate: |
+                "The recent IAM Identity Center JIT access request has failed because it has invalid parameters. Make sure that all the parameters in the request, such as the permission set, is valid."
+                "The error was detected on <eventTime>."
+                
+              
+
+###########
+# Outputs #
+###########
+
+Outputs:
+  PermissionSetApprovers:
+    Description: IAM Identity Center permission set to assign to approvers
+    Value: !FindInMap [ Variables, PermissionSetNameApproveAWSAccountAccess, Value ]
+
+  PermissionSetRequesters:
+    Description: IAM Identity Center permission set to assign to requesters
+    Value: !FindInMap [ Variables, PermissionSetNameRequestAWSAccountAccess, Value ]
+
+  PermissionSetRequestersNoApproval:
+    Description: IAM Identity Center permission set to assign to requesters that can bypass approvals if allowed
+    Value: !FindInMap [ Variables, PermissionSetNameRequestAccountAccessNoApproval, Value ]
+
+
+
+
+
+
+
+
+
+
+
